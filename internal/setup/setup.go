@@ -130,9 +130,6 @@ func (s *Server) auth(next http.Handler) http.Handler {
 
 func baseURL(r *http.Request) string { return "http://" + r.Host }
 
-// DefaultImage is the published runner image a new pool uses when no template container is given.
-const DefaultImage = "ubuntu-latest"
-
 var ownerRe = regexp.MustCompile(`^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$`)
 
 func (s *Server) fail(w http.ResponseWriter, r *http.Request, msg string) {
@@ -166,7 +163,7 @@ func (s *Server) saveHost(w http.ResponseWriter, r *http.Request) {
 	}
 	p.Template, p.Image = tpl, ""
 	if tpl == 0 {
-		p.Image = DefaultImage
+		p.Image = config.DefaultImage
 	}
 	s.errMsg = ""
 	s.mu.Unlock()

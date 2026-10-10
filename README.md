@@ -36,7 +36,8 @@ On the Proxmox host, as root:
 curl -fsSL https://github.com/ServerTooling/proxmox-github-runners/releases/latest/download/install.sh | sh
 ```
 
-Then:
+The installer writes `/etc/pve-runners/config.yaml` with every setting at its default and a comment
+explaining each one (an existing config is never overwritten). Then:
 
 1. **Firewall:** turn on the datacenter firewall (Datacenter > Firewall > Options) after checking
    your own access rules allow you into the web UI and SSH. Runner isolation depends on it.

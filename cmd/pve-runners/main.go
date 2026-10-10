@@ -50,7 +50,8 @@ Usage:
   pve-runners status                          show runners on this host
   pve-runners template prepare --ctid ID      install the runner into a container and make it a template
   pve-runners images list|pull|prune          runner images: show templates, fetch pools' images now, age out old ones
-  pve-runners config validate|show            check or print the config (secrets are never in it)
+  pve-runners config init|validate|show       write the default config (never over a non-empty one),
+                                              check it, or print it (secrets are never in it)
   pve-runners update [--now]                  check for (and install) a newer release
   pve-runners version
 
@@ -137,9 +138,18 @@ func run(args []string) error {
 		return cmdImages(ctx, *cfgPath, rest[0])
 	case "config":
 		if len(rest) == 0 {
-			return errors.New("usage: pve-runners config validate|show")
+			return errors.New("usage: pve-runners config init|validate|show")
 		}
 		if err := fs.Parse(rest[1:]); err != nil {
+			return err
+		}
+		if rest[0] == "init" {
+			wrote, err := config.Init(*cfgPath, nodeName())
+			if err == nil && wrote {
+				fmt.Printf("wrote %s with the default settings\n", *cfgPath)
+			} else if err == nil {
+				fmt.Printf("%s already has settings; left it as is\n", *cfgPath)
+			}
 			return err
 		}
 		data, err := os.ReadFile(*cfgPath)
@@ -330,15 +340,23 @@ func cmdImages(ctx context.Context, cfgPath, sub string) error {
 	return fmt.Errorf("unknown images command %q; use list, pull or prune", sub)
 }
 
+// nodeName is this host's Proxmox node name, which Proxmox takes from the short hostname.
+func nodeName() string {
+	h, _ := os.Hostname()
+	return strings.SplitN(h, ".", 2)[0]
+}
+
 func cmdSetup(ctx context.Context, cfgPath, listen string) error {
-	cfg := config.Default()
-	if existing, err := config.Load(cfgPath); err == nil {
-		cfg = existing // re-running setup adds to the current config
-	} else if !errors.Is(err, os.ErrNotExist) {
+	// A missing or empty config starts from the defaults; re-running setup adds to an existing one.
+	if _, err := config.Init(cfgPath, nodeName()); err != nil {
+		return err
+	}
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
 		return err
 	}
 	if cfg.Proxmox.Node == "" {
-		cfg.Proxmox.Node, _ = os.Hostname()
+		cfg.Proxmox.Node = nodeName()
 	}
 	s, err := setup.NewServer(cfg, cfgPath)
 	if err != nil {
@@ -452,8 +470,7 @@ func cmdTemplatePrepare(ctx context.Context, cfgPath string, ctid int) error {
 	}
 	cfg, err := config.Load(cfgPath)
 	if errors.Is(err, os.ErrNotExist) {
-		cfg = config.Default() // template prep can run before setup
-		cfg.Proxmox.Node, _ = os.Hostname()
+		cfg = config.Initial(nodeName()) // template prep can run before setup
 	} else if err != nil {
 		return err
 	}

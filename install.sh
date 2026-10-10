@@ -47,11 +47,14 @@ WantedBy=multi-user.target
 UNIT
 systemctl daemon-reload
 
-if [ ! -f /etc/pve-runners/config.yaml ]; then
+# Writes every setting with its default and an explanation; an existing non-empty config is kept.
+/usr/local/bin/pve-runners config init
+
+if /usr/local/bin/pve-runners config validate | grep -q ': 0 targets'; then
   echo
-  echo "Next: prepare a runner template, then connect GitHub."
-  echo "  1. Create an Ubuntu 24.04 LXC (unprivileged, nesting=1,keyctl=1) with an ID outside 9000-9499,"
-  echo "     e.g. 8000, then run: pve-runners template prepare --ctid 8000"
+  echo "Settings: /etc/pve-runners/config.yaml (every option is listed there with its default)."
+  echo "Next, connect GitHub:"
+  echo "  1. Turn on the datacenter firewall (Datacenter > Firewall > Options); runners stay off the LAN through it."
   echo "  2. Run: pve-runners setup   (prints a link to open in your browser)"
   echo "  3. Run: systemctl enable --now pve-runners"
 else

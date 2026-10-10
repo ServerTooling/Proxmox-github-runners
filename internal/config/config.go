@@ -7,6 +7,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -60,7 +61,12 @@ type GitHub struct {
 	APIURL        string `yaml:"api_url"`
 	RunnerVersion string `yaml:"runner_version"`
 	RunnerSHA256  string `yaml:"runner_sha256"`
+	// pinned records that the file set the runner version, so Render writes it back only then.
+	pinned bool
 }
+
+// Pinned reports whether the config pins actions/runner rather than following this build.
+func (g GitHub) Pinned() bool { return g.pinned }
 
 // Target is one account the service serves: an org (org-level runners) or a personal account
 // (repo-level runners, since personal accounts have no org runner groups).
@@ -174,6 +180,30 @@ func Default() *Config {
 	}
 }
 
+// DefaultImage is the published runner image a new host's default pool uses.
+const DefaultImage = "ubuntu-latest"
+
+// Initial is the config a fresh install starts from: every default, plus one pool on the published
+// image with the `proxmox` label. Setup adds the GitHub targets.
+func Initial(node string) *Config {
+	c := Default()
+	c.Proxmox.Node = node
+	c.Pools["default"] = &Pool{Image: DefaultImage, Labels: []string{"proxmox"}}
+	c.applyDefaults()
+	return c
+}
+
+// Init writes Initial(node) to path unless a non-empty file is already there, and reports whether it
+// wrote. Existing configs are never overwritten.
+func Init(path, node string) (bool, error) {
+	if data, err := os.ReadFile(path); err == nil && strings.TrimSpace(string(data)) != "" {
+		return false, nil
+	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return false, err
+	}
+	return true, Initial(node).Save(path)
+}
+
 func (c *Config) applyDefaults() {
 	d := Default()
 	if c.Proxmox.VMIDRange == [2]int{} {
@@ -199,6 +229,8 @@ func (c *Config) applyDefaults() {
 	}
 	// An empty runner pin follows the version baked into this build, so self-update also rolls the
 	// runner agent forward. Setting both fields in the file pins it explicitly.
+	c.GitHub.pinned = c.GitHub.RunnerVersion != "" && c.GitHub.RunnerVersion != d.GitHub.RunnerVersion ||
+		c.GitHub.pinned
 	if c.GitHub.RunnerVersion == "" {
 		c.GitHub.RunnerVersion, c.GitHub.RunnerSHA256 = d.GitHub.RunnerVersion, d.GitHub.RunnerSHA256
 	}
@@ -287,10 +319,17 @@ func (c *Config) migrate() (bool, error) {
 
 // Parse decodes, migrates, defaults and validates a config document.
 func Parse(data []byte) (*Config, bool, error) {
-	c := &Config{}
+	// Decoding over the defaults means a key left out of the file keeps its default, including
+	// booleans like update.enabled that applyDefaults can't tell apart from an explicit false.
+	c := Default()
+	c.Version = 0
 	dec := yaml.NewDecoder(strings.NewReader(string(data)))
-	if err := dec.Decode(c); err != nil {
+	// An empty file is a config with every default, which `config init` and setup then fill in.
+	if err := dec.Decode(c); err != nil && !errors.Is(err, io.EOF) {
 		return nil, false, fmt.Errorf("parse config: %w", err)
+	}
+	if strings.TrimSpace(string(data)) == "" {
+		c.Version = CurrentVersion
 	}
 	if len(c.Extra) > 0 {
 		keys := make([]string, 0, len(c.Extra))
@@ -332,9 +371,9 @@ func Load(path string) (*Config, error) {
 	return c, nil
 }
 
-// Save writes the config atomically with 0600 permissions.
+// Save writes the commented config file atomically with 0600 permissions.
 func (c *Config) Save(path string) error {
-	data, err := yaml.Marshal(c)
+	data, err := c.Render()
 	if err != nil {
 		return err
 	}
@@ -342,7 +381,7 @@ func (c *Config) Save(path string) error {
 		return err
 	}
 	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, append([]byte("# Written by pve-runners setup; safe to hand-edit.\n"), data...), 0o600); err != nil {
+	if err := os.WriteFile(tmp, data, 0o600); err != nil {
 		return err
 	}
 	return os.Rename(tmp, path)
