@@ -92,7 +92,7 @@ Two pool settings cut the wait before a job's first step. Every job still gets a
   to unregister it, which it refuses while the runner has a job.
 - `cache: true` mounts a host folder (`cache.dir`, one subfolder per org or account) at
   `/opt/pve-cache` in each runner and points the actions tool cache (`setup-node`, `setup-go`, ...),
-  npm, pnpm, yarn, Go, pip and Playwright there, so these downloads are kept between jobs. Every repo of
+  npm, yarn, Go, pip and Playwright there, so these downloads are kept between jobs. Every repo of
   that org shares it, so a job could leave files that a later job of another repo picks up; turn it on
   only for orgs whose repos you trust with each other. A folder over `cache.max_gb` (50 by default) is
   emptied once none of that org's runners are running; `pve-runners cache clear` empties them now.
@@ -132,6 +132,22 @@ logs:
 Run `pve-runners logs ship` to check it, then `systemctl reload pve-runners`. Lines are labelled
 `service="pve-runners"`, `host`, `unit` (`pve-runners` or `gh-runner`) and, for runners, `vmid`,
 `runner` and `pool`. Anything that looks like a token is masked before it leaves the host.
+
+### Runner usage
+
+With logs on, each running runner's CPU, memory, disk and network use is also sent every
+`logs.interval`, as JSON lines in the `service="pve-runners-usage"` stream (labels `host`, `vmid`,
+`runner`, `pool`, and `repo` once the runner has a job; the job name, workflow and run ID are in the
+line). The figures are the ones Proxmox shows for the container, so nothing runs inside the runner,
+and the same logs token works. `logs.usage: false` turns it off.
+
+Import [docs/grafana/runner-usage.json](docs/grafana/runner-usage.json) (Dashboards > New > Import) for
+graphs per runner and a table per job of peak and average CPU, peak memory and peak disk. To query
+it yourself:
+
+```
+max by (runner) (max_over_time({service="pve-runners-usage"} | json | unwrap mem_bytes [1m]))
+```
 
 ## Updates
 

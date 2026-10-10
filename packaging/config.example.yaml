@@ -74,6 +74,7 @@ logs:                              # ship the service and runner logs to Grafana
   # user: "123456"                 # Grafana Cloud Loki user ID (basic auth); omit for a bearer token
   # token_file: /etc/pve-runners/loki-token   # 0600; Grafana Cloud: access policy token with logs:write
   interval: 15s
+  usage: true                      # also send each runner's CPU, memory, disk and network use, per job
 
 web:                               # settings page at https://<host>:8765, Proxmox login (Sys.Modify)
   enabled: true

@@ -19,7 +19,7 @@ import (
 
 // listeners builds one listener per scale set: each org target's pools, and each pool of a personal
 // account per listed repo (personal accounts only have repo-level runners).
-func listeners(cfg *config.Config, prov *provision.Provisioner, n *notify.Notifier) ([]*autoscale.Listener, error) {
+func listeners(cfg *config.Config, prov *provision.Provisioner, n *notify.Notifier, jobs *autoscale.Jobs) ([]*autoscale.Listener, error) {
 	// GitHub answers a message poll within about 50s; the timeout only catches a dead connection.
 	hc := &http.Client{Timeout: 2 * time.Minute}
 	var out []*autoscale.Listener
@@ -43,7 +43,7 @@ func listeners(cfg *config.Config, prov *provision.Provisioner, n *notify.Notifi
 				}}
 			for _, pn := range t.Pools {
 				l := &autoscale.Listener{Service: client, Target: t, Repo: repo, PoolName: pn, Pool: cfg.Pools[pn],
-					HostID: cfg.HostID, HostMax: cfg.Proxmox.MaxRunners, Prov: prov, Host: prov.Host,
+					HostID: cfg.HostID, HostMax: cfg.Proxmox.MaxRunners, Prov: prov, Host: prov.Host, Jobs: jobs,
 					Private: func(ctx context.Context, owner, r string) (bool, error) {
 						return gh.RepoPrivate(ctx, t.InstallationID, owner, r)
 					},
@@ -78,7 +78,7 @@ type autoscaler struct {
 	wg     sync.WaitGroup
 }
 
-func startAutoscale(ctx context.Context, cfg *config.Config, n *notify.Notifier) (*autoscaler, error) {
+func startAutoscale(ctx context.Context, cfg *config.Config, n *notify.Notifier, jobs *autoscale.Jobs) (*autoscaler, error) {
 	if !cfg.Autoscale.Enabled || len(cfg.Targets) == 0 {
 		return &autoscaler{cancel: func() {}}, nil
 	}
@@ -86,7 +86,7 @@ func startAutoscale(ctx context.Context, cfg *config.Config, n *notify.Notifier)
 	if err != nil {
 		return nil, err
 	}
-	ls, err := listeners(cfg, prov, n)
+	ls, err := listeners(cfg, prov, n, jobs)
 	if err != nil {
 		return nil, err
 	}

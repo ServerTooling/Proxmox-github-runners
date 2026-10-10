@@ -154,6 +154,8 @@ func hostFields() []section {
 			text("logs.user", "Loki user", "Grafana Cloud's numeric user; empty sends the token as a bearer token.",
 				func(c *config.Config) *string { return &c.Logs.User }),
 			duration("logs.interval", "Ship every", "", func(c *config.Config) *time.Duration { return &c.Logs.Interval }),
+			optBool("logs.usage", "Runner usage", "Send each runner's CPU, memory, disk and network use, labelled with its job.",
+				func(c *config.Config) **bool { return &c.Logs.Usage }),
 		}},
 		{"GitHub", []field{
 			text("github.api_url", "API URL", "", func(c *config.Config) *string { return &c.GitHub.APIURL }),

@@ -59,6 +59,8 @@ type Listener struct {
 	Failed func(ctx context.Context, msg string)
 	Log    *slog.Logger
 	Now    func() time.Time
+	// Jobs, when set, is told which runner runs which job (usage metrics label samples with it).
+	Jobs *Jobs
 	// ConflictWait is how long to wait before retrying when another listener holds the session.
 	ConflictWait time.Duration
 
@@ -213,6 +215,7 @@ func (l *Listener) handle(ctx context.Context, sess *scaleset.Session, msg *scal
 	}
 	var claim []int64
 	for _, j := range jobs {
+		l.Jobs.record(j)
 		switch j.Type {
 		case "JobAvailable":
 			if l.serves(ctx, j) {

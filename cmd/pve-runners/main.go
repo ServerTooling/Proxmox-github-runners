@@ -24,6 +24,7 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"github.com/ServerTooling/proxmox-github-runners/internal/autoscale"
 	"github.com/ServerTooling/proxmox-github-runners/internal/buildinfo"
 	"github.com/ServerTooling/proxmox-github-runners/internal/cache"
 	"github.com/ServerTooling/proxmox-github-runners/internal/config"
@@ -231,8 +232,9 @@ func updater(cfg *config.Config) *update.Updater {
 		}}
 }
 
-// logShipper returns nil when log shipping is not configured.
-func logShipper(cfg *config.Config) (*logship.Shipper, error) {
+// logShipper returns nil when log shipping is not configured. jobs, when set, labels usage samples with
+// the job each runner is running.
+func logShipper(cfg *config.Config, jobs *autoscale.Jobs) (*logship.Shipper, error) {
 	if !cfg.Logs.On() {
 		return nil, nil
 	}
@@ -241,7 +243,11 @@ func logShipper(cfg *config.Config) (*logship.Shipper, error) {
 		return nil, fmt.Errorf("read logs token file: %w", err)
 	}
 	return &logship.Shipper{Host: host(cfg), URL: cfg.Logs.URL, User: cfg.Logs.User, Token: strings.TrimSpace(string(b)),
-		HostID: cfg.HostID, HTTP: &http.Client{Timeout: 30 * time.Second}, Now: time.Now}, nil
+		HostID: cfg.HostID, HTTP: &http.Client{Timeout: 30 * time.Second}, Now: time.Now, Usage: cfg.Logs.UsageOn(),
+		Jobs: func(runner string) (logship.Job, bool) {
+			j, ok := jobs.Of(runner)
+			return logship.Job{Repo: j.Repo, Name: j.Job, Workflow: j.Workflow, RunID: j.RunID}, ok
+		}}, nil
 }
 
 // startWeb serves the settings page until ctx ends or the returned stop is called. It needs the
@@ -700,7 +706,7 @@ func cmdLogsShip(ctx context.Context, w io.Writer, cfgPath string) error {
 	if err != nil {
 		return err
 	}
-	sh, err := logShipper(cfg)
+	sh, err := logShipper(cfg, nil)
 	if err != nil {
 		return err
 	}
@@ -943,12 +949,14 @@ func cmdRun(ctx context.Context, cfgPath string) error {
 
 	// Shipping runs beside the loop so a slow log endpoint never delays reconcile. Repeated failures
 	// are logged once per distinct error: each logged line would itself be shipped next round.
+	// Which runner runs which job, as the listeners hear it; it outlives reloads so labels survive them.
+	jobs := &autoscale.Jobs{}
 	var shipper *logship.Shipper
 	var logsBusy atomic.Bool
 	var lastShipErr string
 	setShipper := func(cfg *config.Config) {
 		var err error
-		if shipper, err = logShipper(cfg); err != nil {
+		if shipper, err = logShipper(cfg, jobs); err != nil {
 			slog.Error("log shipping disabled", "err", err)
 		}
 		logsTick.Reset(cfg.Logs.Interval)
@@ -985,7 +993,7 @@ func cmdRun(ctx context.Context, cfgPath string) error {
 			return
 		}
 		var err error
-		if scaler, err = startAutoscale(ctx, cfg, n); err != nil {
+		if scaler, err = startAutoscale(ctx, cfg, n, jobs); err != nil {
 			slog.Error("autoscale", "err", err)
 		}
 	}

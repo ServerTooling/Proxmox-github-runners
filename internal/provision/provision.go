@@ -81,7 +81,6 @@ func CacheDir(cfg *config.Config, owner string) string {
 var cacheEnv = strings.ReplaceAll(`RUNNER_TOOL_CACHE=@/toolcache
 AGENT_TOOLSDIRECTORY=@/toolcache
 npm_config_cache=@/npm
-npm_config_store_dir=@/pnpm
 YARN_CACHE_FOLDER=@/yarn
 GOMODCACHE=@/go/mod
 GOCACHE=@/go/build

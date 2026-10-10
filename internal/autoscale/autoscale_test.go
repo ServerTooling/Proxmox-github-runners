@@ -337,3 +337,24 @@ func TestIdle(t *testing.T) {
 		t.Errorf("35m after a job: %d, want 1", n)
 	}
 }
+
+func TestJobsAreRememberedPerRunner(t *testing.T) {
+	h := newHarness(t)
+	h.l.Jobs = &Jobs{}
+	stop := h.start(t)
+	h.svc.Push(0, scalesettest.Job{Type: "JobStarted", RepositoryName: "app", OwnerName: "example-org",
+		RunnerName: "gh-pve1-small-9000", JobDisplayName: "unit (2, 4)", JobWorkflowRef: "example-org/app/.github/workflows/ci.yml@refs/heads/main",
+		WorkflowRunID: 42})
+	eventually(t, "message ack", func() bool { return h.svc.Pending() == 0 })
+	got, ok := h.l.Jobs.Of("gh-pve1-small-9000")
+	want := JobInfo{Repo: "example-org/app", Job: "unit (2, 4)", Workflow: "example-org/app/.github/workflows/ci.yml@refs/heads/main", RunID: 42}
+	if !ok || got != want {
+		t.Fatalf("got %+v %v", got, ok)
+	}
+	h.svc.Push(0, scalesettest.Job{Type: "JobCompleted", RepositoryName: "app", OwnerName: "example-org", RunnerName: "gh-pve1-small-9000"})
+	eventually(t, "message ack", func() bool { return h.svc.Pending() == 0 })
+	stop()
+	if _, ok := h.l.Jobs.Of("gh-pve1-small-9000"); ok {
+		t.Error("a finished job is still remembered")
+	}
+}

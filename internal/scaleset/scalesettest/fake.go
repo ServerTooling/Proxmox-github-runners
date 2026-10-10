@@ -36,6 +36,10 @@ type Job struct {
 	RunnerRequestID int64  `json:"runnerRequestId"`
 	RepositoryName  string `json:"repositoryName"`
 	OwnerName       string `json:"ownerName"`
+	RunnerName      string `json:"runnerName,omitempty"`
+	JobDisplayName  string `json:"jobDisplayName,omitempty"`
+	JobWorkflowRef  string `json:"jobWorkflowRef,omitempty"`
+	WorkflowRunID   int64  `json:"workflowRunId,omitempty"`
 }
 
 type ScaleSet struct {

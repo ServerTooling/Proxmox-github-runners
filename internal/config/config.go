@@ -184,9 +184,18 @@ type Logs struct {
 	// TokenFile holds the token (for Grafana Cloud, an access policy token with logs:write), mode 0600.
 	TokenFile string        `yaml:"token_file,omitempty"`
 	Interval  time.Duration `yaml:"interval"`
+	// Usage also sends each runner's CPU, memory, disk and network use every interval, labelled with
+	// its job, as the pve-runners-usage stream. Default true.
+	Usage *bool `yaml:"usage,omitempty"`
 }
 
 func (l Logs) On() bool { return l.URL != "" && l.TokenFile != "" }
+
+// UsageWanted is the usage setting; UsageOn also needs shipping configured.
+func (l Logs) UsageWanted() bool { return l.Usage == nil || *l.Usage }
+
+// UsageOn reports whether runner usage samples are sent along with the logs.
+func (l Logs) UsageOn() bool { return l.On() && l.UsageWanted() }
 
 // Web is the settings page the service serves over HTTPS with the Proxmox node's certificate. Logging
 // in takes a Proxmox account with Sys.Modify (root@pam has it); saving restarts the service.
