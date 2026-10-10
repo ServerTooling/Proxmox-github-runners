@@ -296,14 +296,56 @@ type JITConfig struct {
 	EncodedJITConfig string `json:"encodedJITConfig"`
 }
 
+// GenerateJIT registers a runner and returns its single-use config. A runner that never took a job
+// (it crashed, or its container was destroyed first) stays registered, and its name comes back when
+// the container ID is reused. Runner names hold the host ID and a container ID that is free right
+// now, so a registration with this name is stale: remove it and register again.
 func (c *Client) GenerateJIT(ctx context.Context, scaleSetID int64, name, workFolder string) (*JITConfig, error) {
 	var out JITConfig
 	path := scaleSetEndpoint + "/" + strconv.FormatInt(scaleSetID, 10) + "/generatejitconfig"
 	body := map[string]string{"name": name, "workFolder": workFolder}
+	err := c.call(ctx, http.MethodPost, path, nil, body, &out)
+	if !isRunnerExists(err) {
+		if err != nil {
+			return nil, err
+		}
+		return &out, nil
+	}
+	if rerr := c.removeRunnerNamed(ctx, name); rerr != nil {
+		return nil, errors.Join(err, fmt.Errorf("remove stale runner %s: %w", name, rerr))
+	}
 	if err := c.call(ctx, http.MethodPost, path, nil, body, &out); err != nil {
 		return nil, err
 	}
 	return &out, nil
+}
+
+func isRunnerExists(err error) bool {
+	var se *ServiceError
+	return errors.As(err, &se) && se.Status == http.StatusConflict && strings.Contains(se.TypeName, "AgentExistsException")
+}
+
+func (c *Client) removeRunnerNamed(ctx context.Context, name string) error {
+	var list struct {
+		Count int `json:"count"`
+		Value []struct {
+			ID   int64  `json:"id"`
+			Name string `json:"name"`
+		} `json:"value"`
+	}
+	if err := c.call(ctx, http.MethodGet, "_apis/runtime/runners", url.Values{"agentName": {name}}, nil, &list); err != nil {
+		return err
+	}
+	for _, r := range list.Value {
+		if r.Name != name {
+			continue
+		}
+		if err := c.call(ctx, http.MethodDelete, "_apis/distributedtask/pools/0/agents/"+strconv.FormatInt(r.ID, 10),
+			nil, nil, nil); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 type Statistics struct {
