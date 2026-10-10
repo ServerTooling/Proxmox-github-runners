@@ -24,6 +24,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/ServerTooling/proxmox-github-runners/internal/config"
 	"github.com/ServerTooling/proxmox-github-runners/internal/github"
@@ -85,9 +86,14 @@ type Server struct {
 	// proxmox.storage.
 	Storages []string
 
-	mu     sync.Mutex
-	apps   map[string]*appState // by owner (lowercase)
-	errMsg string
+	// Service, when set, makes this the always-on settings page instead of one-time setup.
+	Service *Service
+
+	mu       sync.Mutex
+	apps     map[string]*appState // by owner (lowercase)
+	errMsg   string
+	sessions map[string]time.Time  // settings page logins: session ID -> expiry
+	runs     map[string]*actionRun // latest run of each settings page action
 }
 
 func NewServer(cfg *config.Config, configPath string) (*Server, error) {
@@ -97,16 +103,21 @@ func NewServer(cfg *config.Config, configPath string) (*Server, error) {
 	}
 	return &Server{Cfg: cfg, ConfigPath: configPath, KeyDir: filepath.Dir(config.KeyPath("x")),
 		GitHubWeb: "https://github.com", API: cfg.GitHub.APIURL, HTTP: &http.Client{},
-		Token: hex.EncodeToString(b), Done: make(chan struct{}), apps: map[string]*appState{}}, nil
+		Token: hex.EncodeToString(b), Done: make(chan struct{}), apps: map[string]*appState{},
+		sessions: map[string]time.Time{}, runs: map[string]*actionRun{}}, nil
 }
 
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /{$}", s.index)
-	mux.HandleFunc("POST /host", s.saveHost)
 	mux.HandleFunc("POST /app/new", s.newApp)
 	mux.HandleFunc("GET /app/created", s.appCreated)
 	mux.HandleFunc("GET /app/installed", s.appInstalled)
+	if s.Service != nil {
+		mux.HandleFunc("GET /{$}", s.settings)
+		return s.serviceHandler(mux)
+	}
+	mux.HandleFunc("GET /{$}", s.index)
+	mux.HandleFunc("POST /host", s.saveHost)
 	mux.HandleFunc("POST /finish", s.finish)
 	return s.auth(mux)
 }
@@ -132,7 +143,12 @@ func (s *Server) auth(next http.Handler) http.Handler {
 	})
 }
 
-func baseURL(r *http.Request) string { return "http://" + r.Host }
+func baseURL(r *http.Request) string {
+	if r.TLS != nil {
+		return "https://" + r.Host
+	}
+	return "http://" + r.Host
+}
 
 var ownerRe = regexp.MustCompile(`^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$`)
 
@@ -273,6 +289,10 @@ func (s *Server) appInstalled(w http.ResponseWriter, r *http.Request) {
 				s.fail(w, r, err.Error())
 				return
 			}
+			if s.Service != nil {
+				s.saveNow(w, r)
+				return
+			}
 			http.Redirect(w, r, "/", http.StatusSeeOther)
 			return
 		}
@@ -343,6 +363,24 @@ func (s *Server) finish(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// saveNow writes the current config from the settings page (after adding an org) and restarts.
+func (s *Server) saveNow(w http.ResponseWriter, r *http.Request) {
+	s.mu.Lock()
+	err := s.Cfg.Validate()
+	if err == nil {
+		err = s.Cfg.Save(s.ConfigPath)
+	}
+	s.mu.Unlock()
+	if err != nil {
+		s.fail(w, r, err.Error())
+		return
+	}
+	render(w, savedTmpl, nil)
+	if s.Service.Saved != nil {
+		s.Service.Saved()
+	}
+}
+
 func marshalValidate(c *config.Config) (*config.Config, error) {
 	if len(c.Targets) == 0 {
 		return nil, errors.New("add at least one org or account before finishing")
@@ -373,7 +411,7 @@ func render(w http.ResponseWriter, t *template.Template, data any) {
 
 const page = `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>pve-runners setup</title><style>body{font:16px system-ui,sans-serif;max-width:40rem;margin:2rem auto;padding:0 1rem;line-height:1.5}
-fieldset{border:1px solid #ccc;border-radius:8px;margin:1rem 0;padding:1rem}input{font:inherit;padding:.3rem}button{font:inherit;padding:.4rem .9rem}
+fieldset{border:1px solid #ccc;border-radius:8px;margin:1rem 0;padding:1rem}input{font:inherit;padding:.3rem}pre{background:#f4f4f4;padding:.5rem;overflow-x:auto;font-size:13px}button{font:inherit;padding:.4rem .9rem}
 .err{background:#fde8e8;padding:.6rem;border-radius:6px}code{background:#eee;padding:0 .2rem}</style></head><body>`
 
 var indexTmpl = template.Must(template.New("index").Parse(page + `

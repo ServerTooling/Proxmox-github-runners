@@ -81,6 +81,18 @@ Configuration reference: [packaging/config.example.yaml](packaging/config.exampl
 runner is 4 cores, 8 GB RAM and a 40 GB disk, with at most 4 runners per host
 (`proxmox.max_runners`).
 
+## Settings page
+
+The service serves a settings page at `https://<this host>:8765`, using the same certificate as the
+Proxmox web UI. Log in with a Proxmox account that has `Sys.Modify` (such as `root@pam`). The page covers
+every setting: host limits, network, images, updates, alerts, logs, each pool, and the connected orgs,
+including adding an org. It also takes the notify webhook URL and the Loki token, which are written to
+their own 0600 files and never shown again. Saving validates the whole config, writes it and restarts the
+service. Buttons run what the CLI does (clean up, start a runner, list, pull or prune images, check for
+or install an update, ship logs, show the config file, prepare a template), with their output on the
+page; the status at the top is `pve-runners status`. Set `web.enabled: false` to turn the page off, or `web.listen` to move it. With the Proxmox
+firewall on and its input policy set to DROP, allow the port on the host.
+
 ## Logs
 
 The service logs to the journal (`journalctl -u pve-runners`). To read logs away from the host, set

@@ -68,6 +68,10 @@ logs:                              # ship the service and runner logs to Grafana
   # token_file: /etc/pve-runners/loki-token   # 0600; Grafana Cloud: access policy token with logs:write
   interval: 15s
 
+web:                               # settings page at https://<host>:8765, Proxmox login (Sys.Modify)
+  enabled: true
+  listen: ":8765"
+
 update:
   enabled: true
   channel: edge                    # edge = every build from main | stable = v* tags only

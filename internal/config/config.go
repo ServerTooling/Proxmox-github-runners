@@ -45,6 +45,7 @@ type Config struct {
 	Network Network          `yaml:"network"`
 	Notify  Notify           `yaml:"notify"`
 	Logs    Logs             `yaml:"logs"`
+	Web     Web              `yaml:"web"`
 	// Autoscale listens to GitHub's job queue and starts a runner for each queued job.
 	Autoscale Autoscale      `yaml:"autoscale"`
 	Extra     map[string]any `yaml:",inline"`
@@ -73,6 +74,11 @@ type GitHub struct {
 
 // Pinned reports whether the config pins actions/runner rather than following this build.
 func (g GitHub) Pinned() bool { return g.pinned }
+
+// Pin sets the runner pin as if the file had set it; an empty version follows this build again.
+func (g *GitHub) Pin(version, sha256 string) {
+	g.RunnerVersion, g.RunnerSHA256, g.pinned = version, sha256, version != ""
+}
 
 // Target is one account the service serves: an org (org-level runners) or a personal account
 // (repo-level runners, since personal accounts have no org runner groups).
@@ -166,6 +172,15 @@ type Logs struct {
 
 func (l Logs) On() bool { return l.URL != "" && l.TokenFile != "" }
 
+// Web is the settings page the service serves over HTTPS with the Proxmox node's certificate. Logging
+// in takes a Proxmox account with Sys.Modify (root@pam has it); saving restarts the service.
+type Web struct {
+	Enabled *bool  `yaml:"enabled,omitempty"` // default true
+	Listen  string `yaml:"listen"`
+}
+
+func (w Web) On() bool { return w.Enabled == nil || *w.Enabled }
+
 // Images controls template images downloaded from GitHub releases (see templates/ in this repo).
 // Runner containers are destroyed as soon as their job ends; images are kept and only aged out by
 // RetentionDays. The newest image of each name, pinned images, and images that runners were cloned
@@ -213,6 +228,7 @@ func Default() *Config {
 		},
 		Autoscale: Autoscale{Enabled: true},
 		Logs:      Logs{Interval: 15 * time.Second},
+		Web:       Web{Listen: ":8765"},
 		Update: Update{
 			Enabled: true, Channel: "edge", Interval: 15 * time.Minute,
 			Repo: "ServerTooling/proxmox-github-runners",
@@ -303,6 +319,9 @@ func (c *Config) applyDefaults() {
 	}
 	if c.Images.CheckInterval == 0 {
 		c.Images.CheckInterval = d.Images.CheckInterval
+	}
+	if c.Web.Listen == "" {
+		c.Web.Listen = d.Web.Listen
 	}
 	if c.Logs.Interval == 0 {
 		c.Logs.Interval = d.Logs.Interval
@@ -477,6 +496,9 @@ func (c *Config) Validate() error {
 		if c.Logs.TokenFile == "" {
 			add("logs.url is set but logs.token_file is not")
 		}
+	}
+	if _, port, err := net.SplitHostPort(c.Web.Listen); err != nil || port == "" {
+		add("web.listen %q must be [address]:port, such as :8765", c.Web.Listen)
 	}
 	if c.Logs.Interval < 5*time.Second {
 		add("logs.interval must be at least 5s, got %s", c.Logs.Interval)

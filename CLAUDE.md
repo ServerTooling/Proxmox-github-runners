@@ -31,7 +31,9 @@ SKIP_ROLES=go,helm templates/build.sh ubuntu-latest /tmp/out    # local image bu
   exchange, scale sets, message sessions, job acquire, JIT); tests assert exact requests against
   `scalesettest.Fake`. `internal/autoscale`: one listener per target x pool (x repo for personal
   accounts) that claims private-repo jobs and spawns runners tagged `scaleset-<id>`.
-- `internal/setup`: one-time setup page (manifest flow, one private App per org).
+- `internal/setup`: one-time setup page (manifest flow, one private App per org), and the same server as
+  the service's always-on settings page (`Service` set): Proxmox login (`PVELogin`, Sys.Modify), every
+  config field in `fields.go`, secrets written to 0600 files, save validates then restarts the service.
 - `internal/images`: published runner images: resolve release, verify signed SHA256SUMS, cache in
   the vztmpl dir, `pct create` a template in `images.vmid_range`, prune by age. `pve.OwnedTemplate`
   (tag `gh-template` AND inside that range) guards template deletion; keep it.

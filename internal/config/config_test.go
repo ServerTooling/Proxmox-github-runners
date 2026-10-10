@@ -39,7 +39,7 @@ func TestParseAppliesDefaults(t *testing.T) {
 		t.Fatalf("host_id should default to the node name, got %q", c.HostID)
 	}
 	if c.Proxmox.VMIDRange != [2]int{9000, 9499} || c.Update.Channel != "edge" || c.Update.Interval != 15*time.Minute || c.Images.RetentionDays != 30 ||
-		c.Logs.On() || c.Logs.Interval != 15*time.Second {
+		c.Logs.On() || c.Logs.Interval != 15*time.Second || !c.Web.On() || c.Web.Listen != ":8765" {
 		t.Fatalf("defaults not applied: %+v %+v %+v", c.Proxmox, c.Update, c.Logs)
 	}
 }
@@ -51,6 +51,7 @@ update: {channel: nightly}
 images: {retention_days: -5}
 network: {dns: [not-an-ip]}
 logs: {url: "ftp://x", interval: 1s}
+web: {listen: "8765"}
 targets:
   - org: a
     user: b
@@ -72,7 +73,7 @@ pools:
 	}
 	for _, want := range []string{
 		"update.channel", "max_runners", "retention_days", "exactly one of org or user", "no installation_id", "no app_id", "unknown pool \"missing\"",
-		"personal account", "pool name \"bad name\"", "mode must be", "inside vmid_range", "min (5)", "invalid label", "network.dns[0]", "logs.url \"ftp://x\"", "logs.token_file is not", "logs.interval",
+		"personal account", "pool name \"bad name\"", "mode must be", "inside vmid_range", "min (5)", "invalid label", "network.dns[0]", "logs.url \"ftp://x\"", "logs.token_file is not", "logs.interval", "web.listen",
 	} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("missing %q in:\n%v", want, err)
@@ -185,6 +186,7 @@ network:
   dns: [192.0.2.53, "2001:db8::53"]
 notify: {webhook_url_file: /etc/pve-runners/notify-url, format: ntfy}
 logs: {url: "https://logs.example.com", user: "123", token_file: /etc/pve-runners/loki-token, interval: 30s}
+web: {enabled: false, listen: "127.0.0.1:9000"}
 github: {runner_version: "9.9.9", runner_sha256: abc}
 `))
 	if err != nil {
@@ -210,7 +212,7 @@ github: {runner_version: "9.9.9", runner_sha256: abc}
 		!img.FullClone || img.Min != 1 || img.ScaleSetName() != "pve-img" || back.Autoscale.Enabled || back.Notify.Format != "ntfy" || !back.GitHub.Pinned() ||
 		back.Network.Allow[0].Dest != "192.0.2.1" || len(back.Network.DNS) != 2 || back.Network.DNS[1] != "2001:db8::53" || back.Targets[1].Repos[0] != "side" ||
 		!back.Logs.On() || back.Logs.URL != "https://logs.example.com" || back.Logs.User != "123" ||
-		back.Logs.Interval != 30*time.Second {
+		back.Logs.Interval != 30*time.Second || back.Web.On() || back.Web.Listen != "127.0.0.1:9000" {
 		t.Fatalf("values lost: %+v %+v", img, back)
 	}
 }
