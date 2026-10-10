@@ -32,7 +32,9 @@ RuntimeDirectoryMode=0700
 # runner writes its logs to _diag; anything left there by root (an image build's checks) would make
 # it crash on start, so the runner always gets a fresh one.
 ExecStartPre=+/bin/sh -c 'install -o runner -m 0400 /etc/gh-runner/jitconfig /run/gh-runner/jit && rm -f /etc/gh-runner/jitconfig && rm -rf /opt/actions-runner/_diag'
-ExecStart=/bin/sh -c 'cfg=$(cat /run/gh-runner/jit); rm -f /run/gh-runner/jit; exec ./run.sh --jitconfig "$cfg"'
+# The runner reads ACTIONS_RUNNER_INPUT_JITCONFIG like --jitconfig; the environment keeps the credential
+# out of the process list (ps), where an argument would show it to anyone looking.
+ExecStart=/bin/sh -c 'ACTIONS_RUNNER_INPUT_JITCONFIG=$(cat /run/gh-runner/jit); export ACTIONS_RUNNER_INPUT_JITCONFIG; rm -f /run/gh-runner/jit; exec ./run.sh'
 # One job only: when the runner exits, for any reason, stop the guest so the host reclaims it.
 ExecStopPost=+/bin/systemctl poweroff --no-block
 

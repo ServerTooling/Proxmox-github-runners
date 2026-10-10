@@ -49,7 +49,7 @@ Job lifecycle (ephemeral):
 2. Scheduler maps labels to a pool, checks pool max and host free RAM/CPU.
 3. Provisioner asks GitHub for a JIT runner config (`POST /orgs/{org}/actions/runners/generate-jitconfig`, or the scale set equivalent).
 4. Linked-clone the pool's template, tag it `gh-runner,pool-<name>,org-<org>`, inject the JIT config, start it.
-5. Inside the guest, a baked-in systemd unit runs `./run.sh --jitconfig <cfg>`; the runner takes exactly one job then exits, and the unit powers the guest off.
+5. Inside the guest, a baked-in systemd unit runs `./run.sh` with the config in `ACTIONS_RUNNER_INPUT_JITCONFIG` (kept out of `ps`); the runner takes exactly one job then exits, and the unit powers the guest off.
 6. Reconciler sees a stopped `gh-runner` guest and destroys it.
 
 Permanent runners: same clone path, but registered with a registration token (`config.sh --unattended --labels ...` + `svc.sh install`) and kept at a fixed count (`min`) by the reconciler instead of being created per job.
