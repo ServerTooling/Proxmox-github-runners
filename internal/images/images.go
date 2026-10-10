@@ -313,6 +313,9 @@ func (m *Manager) create(ctx context.Context, name, release, file string) (id in
 			"created-" + strconv.FormatInt(m.now().Unix(), 10)},
 		Description: "Runner template " + release + " managed by pve-runners",
 	}
+	if err := m.Host.EnsurePool(ctx, m.Pool); err != nil {
+		return 0, err
+	}
 	if err := m.Host.Exec(ctx, pve.LXCCreate(id, spec)); err != nil {
 		return 0, err
 	}

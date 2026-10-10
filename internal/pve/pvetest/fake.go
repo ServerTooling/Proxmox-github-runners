@@ -29,12 +29,14 @@ type Fake struct {
 	Group    []map[string]any
 	// NodeRules are the host firewall rules (pos, comment, dport).
 	NodeRules []map[string]any
+	// ResourcePools are the cluster's resource pools; New starts with gh-runners.
+	ResourcePools []string
 	// Delay makes every command take this long, so concurrent callers interleave like on a real host.
 	Delay time.Duration
 }
 
 func New(guests ...pve.Guest) *Fake {
-	return &Fake{Guests: guests, FreeMB: 32768, FirewallOn: true, Pushed: map[string]string{}, FailOn: map[string]error{}}
+	return &Fake{Guests: guests, ResourcePools: []string{"gh-runners"}, FreeMB: 32768, FirewallOn: true, Pushed: map[string]string{}, FailOn: map[string]error{}}
 }
 
 func (f *Fake) Run(_ context.Context, name string, args ...string) ([]byte, error) {
@@ -126,6 +128,16 @@ func (f *Fake) Run(_ context.Context, name string, args ...string) ([]byte, erro
 		return nil, nil
 	case name == "pvesh" && strings.HasPrefix(args[1], "/nodes/") && strings.Contains(args[1], "/firewall/"):
 		return nil, nil
+	case name == "pvesh" && args[1] == "/pools":
+		if args[0] == "create" {
+			f.ResourcePools = append(f.ResourcePools, args[3])
+			return nil, nil
+		}
+		var out []map[string]string
+		for _, p := range f.ResourcePools {
+			out = append(out, map[string]string{"poolid": p})
+		}
+		return json.Marshal(out)
 	case name == "pvesh" && args[1] == "/cluster/resources":
 		return json.Marshal(f.Guests)
 	case name == "pvesh" && strings.HasSuffix(args[1], "/status"):

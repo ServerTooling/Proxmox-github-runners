@@ -184,6 +184,9 @@ func (p *Provisioner) Spawn(ctx context.Context, req Request) (res *Result, err 
 		return nil, fmt.Errorf("create JIT runner config: %w", err)
 	}
 
+	if err := p.Host.EnsurePool(ctx, p.Cfg.Proxmox.Pool); err != nil {
+		return nil, err
+	}
 	if err := p.Host.Exec(ctx, pve.LXCClone(template, id, name, p.Cfg.Proxmox.Pool, p.Cfg.Proxmox.Storage, pool.FullClone)); err != nil {
 		return nil, err
 	}
