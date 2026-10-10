@@ -39,11 +39,13 @@ curl -fsSL https://github.com/ServerTooling/proxmox-github-runners/releases/late
 The installer writes `/etc/pve-runners/config.yaml` with every setting at its default and a comment
 explaining each one (an existing config is never overwritten). Then:
 
-1. **Firewall:** turn on the datacenter firewall (Datacenter > Firewall > Options) after checking
-   your own access rules allow you into the web UI and SSH. Runner isolation depends on it.
+1. **Firewall:** in Datacenter > Firewall > Options, set **Input Policy** to `ACCEPT` unless you
+   already manage host rules, then set **Firewall** to `Yes`. Runner isolation needs the firewall on,
+   but it comes from rules pve-runners puts on each runner, not from the input policy; with `DROP`,
+   turning the firewall on can lock you out of the host.
 2. **Connect GitHub:** run `pve-runners setup --open-firewall` and open the first printed link (the
    address of the Proxmox web UI). `--open-firewall` lets port 8765 through the Proxmox firewall
-   until setup finishes; without it, the firewall from step 1 blocks the page. For each org, click
+   until setup finishes; it is only needed when the input policy is `DROP`. For each org, click
    through "Create GitHub App" and "Install" on github.com. Make sure the org's runner group does not
    allow public repositories. Leave the template field empty to use the published `ubuntu-latest`
    image.
