@@ -69,6 +69,8 @@ type Fake struct {
 	runners   map[string]int64 // registered runner name -> ID
 	removed   []int64
 	wake      chan struct{}
+	// NoRunnerLookup makes the runner lookup answer 404, as if the endpoint were unavailable.
+	NoRunnerLookup bool
 	// Assigned is reported as totalAssignedJobs in session and message statistics.
 	Assigned int
 }
@@ -234,6 +236,22 @@ func (f *Fake) serve(w http.ResponseWriter, r *http.Request) {
 		svcError(w, 400, "", "missing api-version")
 		return
 	}
+	if r.URL.Path == "/svc/_apis/distributedtask/pools/0/agents" && r.Method == http.MethodGet {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		if f.NoRunnerLookup {
+			svcError(w, 404, "", "")
+			return
+		}
+		name := r.URL.Query().Get("agentName")
+		id, ok := f.runners[name]
+		if !ok {
+			writeJSON(w, 200, map[string]any{"count": 0, "value": []any{}})
+			return
+		}
+		writeJSON(w, 200, map[string]any{"count": 1, "value": []any{map[string]any{"id": id, "name": name}}})
+		return
+	}
 	if idStr, ok := strings.CutPrefix(r.URL.Path, "/svc/_apis/distributedtask/pools/0/agents/"); ok && r.Method == http.MethodDelete {
 		id, _ := strconv.ParseInt(idStr, 10, 64)
 		f.mu.Lock()
@@ -293,14 +311,6 @@ func (f *Fake) serve(w http.ResponseWriter, r *http.Request) {
 		s.ID = int64(len(f.scaleSets) + 1)
 		f.scaleSets = append(f.scaleSets, &s)
 		writeJSON(w, 200, s)
-	case parts[0] == "runners" && r.Method == http.MethodGet:
-		name := r.URL.Query().Get("agentName")
-		id, ok := f.runners[name]
-		if !ok {
-			writeJSON(w, 200, map[string]any{"count": 0, "value": []any{}})
-			return
-		}
-		writeJSON(w, 200, map[string]any{"count": 1, "value": []any{map[string]any{"id": id, "name": name}}})
 	case parts[0] == "runnerscalesets" && len(parts) == 3 && parts[2] == "generatejitconfig":
 		var req struct{ Name string }
 		json.Unmarshal(body, &req)

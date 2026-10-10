@@ -152,12 +152,26 @@ func TestGenerateJITReplacesStaleRunner(t *testing.T) {
 	if got := f.Removed(); len(got) != 1 || got[0] != 55 {
 		t.Errorf("removed = %v", got)
 	}
-	gets := f.CallsTo("GET", "/svc/_apis/runtime/runners")
+	gets := f.CallsTo("GET", "/svc/_apis/distributedtask/pools/0/agents")
 	if len(gets) != 1 || !strings.Contains(gets[0].Query, "agentName=gh-pve1-default-9000") {
 		t.Errorf("lookups = %+v", gets)
 	}
 	if n := len(f.CallsTo("POST", "/svc/_apis/runtime/runnerscalesets/4/generatejitconfig")); n != 2 {
 		t.Errorf("generatejitconfig calls = %d, want 2", n)
+	}
+}
+
+func TestGenerateJITFallsBackToUniqueNameWhenLookupFails(t *testing.T) {
+	f := scalesettest.New()
+	defer f.Close()
+	f.AddRunner("gh-pve1-default-9000", 55)
+	f.NoRunnerLookup = true
+	jit, err := newClient(f).GenerateJIT(context.Background(), 4, "gh-pve1-default-9000", "_work")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(jit.Runner.Name, "gh-pve1-default-9000-") {
+		t.Errorf("jit = %+v", jit)
 	}
 }
 
