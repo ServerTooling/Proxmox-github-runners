@@ -24,9 +24,9 @@ import (
 
 const sessionCookie = "pve_runners_session"
 
-// sessionTTL bounds how long a login lasts; the session store lives in memory, so a restart (every
-// save) also logs everyone out of the old process, which the reload page covers by asking again.
-const sessionTTL = 12 * time.Hour
+// sessionTTL is how long a login lasts without being used; each visit extends it, so a browser that
+// keeps using the page stays logged in until it logs out. Logins survive restarts (see sessions.go).
+const sessionTTL = 7 * 24 * time.Hour
 
 // LoginFunc returns nil when user and password are a Proxmox account allowed to change this host.
 type LoginFunc func(ctx context.Context, user, password string) error
@@ -49,6 +49,7 @@ type Service struct {
 }
 
 func (s *Server) serviceHandler(mux *http.ServeMux) http.Handler {
+	s.loadSessions(time.Now())
 	mux.HandleFunc("GET /login", s.loginPage)
 	mux.HandleFunc("POST /login", s.login)
 	mux.HandleFunc("POST /logout", s.logout)
@@ -59,7 +60,7 @@ func (s *Server) serviceHandler(mux *http.ServeMux) http.Handler {
 			http.Error(w, "cross-site request refused", http.StatusForbidden)
 			return
 		}
-		if r.URL.Path == "/login" || s.validSession(r) {
+		if r.URL.Path == "/login" || s.validSession(w, r) {
 			w.Header().Set("X-Frame-Options", "DENY")
 			mux.ServeHTTP(w, r)
 			return
@@ -82,19 +83,34 @@ func sameOrigin(r *http.Request) bool {
 	return err == nil && u.Host == r.Host
 }
 
-func (s *Server) validSession(r *http.Request) bool {
+func (s *Server) validSession(w http.ResponseWriter, r *http.Request) bool {
 	c, err := r.Cookie(sessionCookie)
 	if err != nil {
 		return false
 	}
+	key, now := sessionKey(c.Value), time.Now()
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	exp, ok := s.sessions[c.Value]
-	if ok && time.Now().After(exp) {
-		delete(s.sessions, c.Value)
+	exp, ok := s.sessions[key]
+	if !ok {
 		return false
 	}
-	return ok
+	if now.After(exp) {
+		delete(s.sessions, key)
+		_ = s.saveSessionsLocked()
+		return false
+	}
+	if exp.Sub(now) < sessionTTL-sessionRenew {
+		s.sessions[key] = now.Add(sessionTTL)
+		_ = s.saveSessionsLocked()
+		setSessionCookie(w, r, c.Value)
+	}
+	return true
+}
+
+func setSessionCookie(w http.ResponseWriter, r *http.Request, id string) {
+	http.SetCookie(w, &http.Cookie{Name: sessionCookie, Value: id, Path: "/", HttpOnly: true, Secure: r.TLS != nil,
+		SameSite: http.SameSiteLaxMode, MaxAge: int(sessionTTL.Seconds())})
 }
 
 func (s *Server) loginPage(w http.ResponseWriter, r *http.Request) {
@@ -118,17 +134,18 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 	}
 	id := hex.EncodeToString(b)
 	s.mu.Lock()
-	s.sessions[id] = time.Now().Add(sessionTTL)
+	s.sessions[sessionKey(id)] = time.Now().Add(sessionTTL)
+	_ = s.saveSessionsLocked()
 	s.mu.Unlock()
-	http.SetCookie(w, &http.Cookie{Name: sessionCookie, Value: id, Path: "/", HttpOnly: true, Secure: r.TLS != nil,
-		SameSite: http.SameSiteLaxMode, MaxAge: int(sessionTTL.Seconds())})
+	setSessionCookie(w, r, id)
 	http.Redirect(w, r, "/", http.StatusSeeOther)
 }
 
 func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
 	if c, err := r.Cookie(sessionCookie); err == nil {
 		s.mu.Lock()
-		delete(s.sessions, c.Value)
+		delete(s.sessions, sessionKey(c.Value))
+		_ = s.saveSessionsLocked()
 		s.mu.Unlock()
 	}
 	http.SetCookie(w, &http.Cookie{Name: sessionCookie, Path: "/", MaxAge: -1})

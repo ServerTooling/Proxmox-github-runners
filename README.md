@@ -102,7 +102,9 @@ Two pool settings cut the wait before a job's first step. Every job still gets a
 ## Settings page
 
 The service serves a settings page at `https://<this host>:8765`, using the same certificate as the
-Proxmox web UI. Log in with a Proxmox account that has `Sys.Modify` (such as `root@pam`). The page covers
+Proxmox web UI. Log in with a Proxmox account that has `Sys.Modify` (such as `root@pam`). The login stays until you log
+out or don't use the page for 7 days, including across restarts and updates (hashes of the session IDs are
+kept in `/etc/pve-runners/web-sessions.json`, mode 0600). The page covers
 every setting: host limits, network, images, updates, alerts, logs, each pool, and the connected orgs,
 including adding an org. It also takes the notify webhook URL and the Loki token, which are written to
 their own 0600 files and never shown again. Saving validates the whole config, writes it and restarts the
