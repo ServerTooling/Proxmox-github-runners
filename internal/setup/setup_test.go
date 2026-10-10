@@ -64,17 +64,23 @@ func TestFullSetupFlowForAnOrg(t *testing.T) {
 	if resp, _ := c.Get(srv.URL + "/"); resp.StatusCode != http.StatusForbidden {
 		t.Fatalf("no token: %d", resp.StatusCode)
 	}
-	if resp, _ := c.Get(srv.URL + "/?t=" + s.Token); resp.StatusCode != 200 {
+	s.Storages = []string{"local-zfs", "local-lvm"}
+	resp, _ := c.Get(srv.URL + "/?t=" + s.Token)
+	if resp.StatusCode != 200 {
 		t.Fatalf("index: %d", resp.StatusCode)
+	}
+	if b, _ := io.ReadAll(resp.Body); !strings.Contains(string(b), "Leave empty to use <code>local-zfs</code>") {
+		t.Fatalf("storage choices missing:\n%s", b)
 	}
 	c.PostForm(srv.URL+"/host", url.Values{"node": {"pve1"}, "template": {"8000"}, "max_runners": {"4"}})
 	if p := s.Cfg.Pools["default"]; p.Template != 8000 || p.Image != "" {
 		t.Fatalf("hand-made template: %+v", p)
 	}
 	// Leaving the template empty switches the pool to the published image.
-	c.PostForm(srv.URL+"/host", url.Values{"node": {"pve1"}, "template": {""}, "max_runners": {"4"}, "bridge": {"vmbr4"}})
+	c.PostForm(srv.URL+"/host", url.Values{"node": {"pve1"}, "template": {""}, "max_runners": {"4"}, "bridge": {"vmbr4"},
+		"storage": {"local-zfs"}})
 
-	resp, _ := c.PostForm(srv.URL+"/app/new", url.Values{"org": {"example-org"}})
+	resp, _ = c.PostForm(srv.URL+"/app/new", url.Values{"org": {"example-org"}})
 	body, _ := io.ReadAll(resp.Body)
 	page := html.UnescapeString(string(body))
 	if !strings.Contains(page, `action="https://github.example/organizations/example-org/settings/apps/new?state=`+s.Token+`"`) {
@@ -115,7 +121,7 @@ func TestFullSetupFlowForAnOrg(t *testing.T) {
 	tg := got.Targets[0]
 	if tg.Org != "example-org" || tg.AppID != 42 || tg.InstallationID != 77 || got.Pools["default"].Template != 0 ||
 		got.Pools["default"].Image != "ubuntu-latest" || got.Proxmox.Bridge != "vmbr4" || got.Pools["default"].Bridge != "vmbr4" ||
-		got.Pools["default"].Labels[0] != "proxmox" || got.Proxmox.Node != "pve1" {
+		got.Pools["default"].Labels[0] != "proxmox" || got.Proxmox.Node != "pve1" || got.Proxmox.Storage != "local-zfs" {
 		t.Fatalf("config: %+v %+v", tg, got.Pools["default"])
 	}
 }

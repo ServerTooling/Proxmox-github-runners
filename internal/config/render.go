@@ -73,7 +73,9 @@ proxmox:
   vmid_range: {{ids .Proxmox.VMIDRange}}
   # Proxmox resource pool that runners and templates are put in.
   pool: {{q .Proxmox.Pool}}
-  # Storage for image template root disks and full clones.
+  # Storage for container root disks (image templates, and runners' full clones). It must have
+  # "Container" content; see "pvesm status --content rootdir". Empty picks one automatically,
+  # preferring LVM-thin, ZFS or Ceph, where runners are fast linked clones.
   storage: {{q .Proxmox.Storage}}
   # Never start a runner that would leave the host with less free memory than this.
   min_free_memory_mb: {{.Proxmox.MinFreeMemoryMB}}

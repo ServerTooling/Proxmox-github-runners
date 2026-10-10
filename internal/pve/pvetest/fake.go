@@ -31,12 +31,17 @@ type Fake struct {
 	NodeRules []map[string]any
 	// ResourcePools are the cluster's resource pools; New starts with gh-runners.
 	ResourcePools []string
+	// Storages is the node's storage list; New starts with local (no containers) and local-lvm.
+	Storages []pve.Storage
 	// Delay makes every command take this long, so concurrent callers interleave like on a real host.
 	Delay time.Duration
 }
 
 func New(guests ...pve.Guest) *Fake {
-	return &Fake{Guests: guests, ResourcePools: []string{"gh-runners"}, FreeMB: 32768, FirewallOn: true, Pushed: map[string]string{}, FailOn: map[string]error{}}
+	return &Fake{Guests: guests, Storages: []pve.Storage{
+		{Name: "local", Type: "dir", Content: "iso,vztmpl,backup", Active: 1, Avail: 50 << 30},
+		{Name: "local-lvm", Type: "lvmthin", Content: "rootdir,images", Active: 1, Avail: 400 << 30},
+	}, ResourcePools: []string{"gh-runners"}, FreeMB: 32768, FirewallOn: true, Pushed: map[string]string{}, FailOn: map[string]error{}}
 }
 
 func (f *Fake) Run(_ context.Context, name string, args ...string) ([]byte, error) {
@@ -128,6 +133,15 @@ func (f *Fake) Run(_ context.Context, name string, args ...string) ([]byte, erro
 		return nil, nil
 	case name == "pvesh" && strings.HasPrefix(args[1], "/nodes/") && strings.Contains(args[1], "/firewall/"):
 		return nil, nil
+	case name == "pvesh" && args[0] == "get" && strings.HasPrefix(args[1], "/nodes/") && strings.HasSuffix(args[1], "/storage"):
+		// Like Proxmox, --content filters the list.
+		var out []pve.Storage
+		for _, st := range f.Storages {
+			if strings.Contains(","+st.Content+",", ","+args[3]+",") {
+				out = append(out, st)
+			}
+		}
+		return json.Marshal(out)
 	case name == "pvesh" && args[1] == "/pools":
 		if args[0] == "create" {
 			f.ResourcePools = append(f.ResourcePools, args[3])

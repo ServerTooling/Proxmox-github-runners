@@ -185,7 +185,7 @@ proxmox:
   max_runners: 4                   # host-wide cap across all pools and orgs (per-host setting)
   vmid_range: [9000, 9499]
   pool: gh-runners
-  storage: local-lvm
+  storage: ""            # container disks; empty picks one with "Container" content (LVM-thin/ZFS first)
   snippets_storage: local          # for VM cloud-init snippets
   min_free_memory_mb: 4096
 
