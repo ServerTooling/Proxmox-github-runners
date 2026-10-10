@@ -52,6 +52,7 @@ images: {retention_days: -5}
 network: {dns: [not-an-ip]}
 logs: {url: "ftp://x", interval: 1s}
 web: {listen: "8765"}
+cache: {dir: /cache, max_gb: -1}
 targets:
   - org: a
     user: b
@@ -65,6 +66,7 @@ pools:
     mode: forever
     min: 5
     max: 1
+    warm: 2
     labels: ["has space"]
 `
 	_, _, err := Parse([]byte(bad))
@@ -74,6 +76,7 @@ pools:
 	for _, want := range []string{
 		"update.channel", "max_runners", "retention_days", "exactly one of org or user", "no installation_id", "no app_id", "unknown pool \"missing\"",
 		"personal account", "pool name \"bad name\"", "mode must be", "inside vmid_range", "min (5)", "invalid label", "network.dns[0]", "logs.url \"ftp://x\"", "logs.token_file is not", "logs.interval", "web.listen",
+		"cache.dir \"/cache\"", "cache.max_gb", "warm (2)",
 	} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("missing %q in:\n%v", want, err)
@@ -179,8 +182,11 @@ func TestRenderRoundTripsAndDocumentsEverySetting(t *testing.T) {
     vlan: 50
     full_clone: true
     min: 1
+    warm: 2
+    cache: true
     scale_set: pve-img
 autoscale: {enabled: false}
+cache: {dir: /srv/runner-cache, max_gb: 20}
 network:
   allow: [{proto: udp, port: 53, dest: 192.0.2.1}]
   dns: [192.0.2.53, "2001:db8::53"]
@@ -209,7 +215,8 @@ github: {runner_version: "9.9.9", runner_sha256: abc}
 	}
 	img := back.Pools["img"]
 	if img.Image != "ubuntu-latest@template-ubuntu-latest-20261012-5" || img.MaxLifetime != 6*time.Hour || img.VLAN != 50 ||
-		!img.FullClone || img.Min != 1 || img.ScaleSetName() != "pve-img" || back.Autoscale.Enabled || back.Notify.Format != "ntfy" || !back.GitHub.Pinned() ||
+		!img.FullClone || img.Min != 1 || img.Warm != 2 || img.WarmFor != 30*time.Minute || !img.Cache ||
+		back.Cache.Dir != "/srv/runner-cache" || back.Cache.MaxGB != 20 || img.ScaleSetName() != "pve-img" || back.Autoscale.Enabled || back.Notify.Format != "ntfy" || !back.GitHub.Pinned() ||
 		back.Network.Allow[0].Dest != "192.0.2.1" || len(back.Network.DNS) != 2 || back.Network.DNS[1] != "2001:db8::53" || back.Targets[1].Repos[0] != "side" ||
 		!back.Logs.On() || back.Logs.URL != "https://logs.example.com" || back.Logs.User != "123" ||
 		back.Logs.Interval != 30*time.Second || back.Web.On() || back.Web.Listen != "127.0.0.1:9000" {

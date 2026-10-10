@@ -68,6 +68,7 @@ type Fake struct {
 	jit       []string
 	runners   map[string]int64 // registered runner name -> ID
 	removed   []int64
+	busy      map[int64]bool
 	wake      chan struct{}
 	// NoRunnerLookup makes the runner lookup answer 404, as if the endpoint were unavailable.
 	NoRunnerLookup bool
@@ -158,6 +159,27 @@ func (f *Fake) Removed() []int64 {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return append([]int64(nil), f.removed...)
+}
+
+// SetBusy marks a registered runner as running a job (or not); removing a busy runner is refused.
+func (f *Fake) SetBusy(id int64, busy bool) {
+	f.mu.Lock()
+	if f.busy == nil {
+		f.busy = map[int64]bool{}
+	}
+	f.busy[id] = busy
+	f.mu.Unlock()
+}
+
+// Registered lists the names of runners still registered.
+func (f *Fake) Registered() map[string]int64 {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := map[string]int64{}
+	for k, v := range f.runners {
+		out[k] = v
+	}
+	return out
 }
 
 // Conflict makes the next n session creations fail with 409.
@@ -256,6 +278,10 @@ func (f *Fake) serve(w http.ResponseWriter, r *http.Request) {
 		id, _ := strconv.ParseInt(idStr, 10, 64)
 		f.mu.Lock()
 		defer f.mu.Unlock()
+		if f.busy[id] {
+			svcError(w, 400, "GitHub.Actions.Runtime.WebApi.JobStillRunningException", "the runner is running a job")
+			return
+		}
 		for name, rid := range f.runners {
 			if rid == id {
 				delete(f.runners, name)

@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/ServerTooling/proxmox-github-runners/internal/buildinfo"
+	"github.com/ServerTooling/proxmox-github-runners/internal/cache"
 	"github.com/ServerTooling/proxmox-github-runners/internal/config"
 	"github.com/ServerTooling/proxmox-github-runners/internal/github"
 	"github.com/ServerTooling/proxmox-github-runners/internal/images"
@@ -58,6 +59,8 @@ Usage:
   pve-runners template prepare --ctid ID      install the runner into a container and make it a template
   pve-runners images list|pull|prune          runner images: show templates, fetch pools' images now, age out old ones
   pve-runners logs ship                       send new log lines to Loki now (see logs: in the config)
+  pve-runners cache list|clear                shared runner caches: show their sizes, or empty the ones
+                                              no running runner is using
   pve-runners config init|validate|show       write the default config (never over a non-empty one),
                                               check it, or print it (secrets are never in it)
   pve-runners update [--now]                  check for (and install) a newer release
@@ -145,6 +148,14 @@ func run(args []string) error {
 			return err
 		}
 		return cmdLogsShip(ctx, os.Stdout, *cfgPath)
+	case "cache":
+		if len(rest) == 0 || rest[0] != "list" && rest[0] != "clear" {
+			return errors.New("usage: pve-runners cache list|clear")
+		}
+		if err := fs.Parse(rest[1:]); err != nil {
+			return err
+		}
+		return cmdCache(ctx, os.Stdout, *cfgPath, rest[0] == "clear")
 	case "config":
 		if len(rest) == 0 {
 			return errors.New("usage: pve-runners config init|validate|show")
@@ -330,6 +341,15 @@ func webActions(cfgPath string, imageBusy *atomic.Bool) []setup.Action {
 			Confirm: "Install the update and restart pve-runners?", Run: update(true)},
 		{Name: "logs-ship", Label: "Ship logs now", Help: "Send new log lines to Loki.",
 			Run: func(ctx context.Context, w io.Writer, _ map[string]string) error { return cmdLogsShip(ctx, w, cfgPath) }},
+		{Name: "cache-list", Label: "Show cache sizes", Help: "Each org's shared runner cache folder.",
+			Run: func(ctx context.Context, w io.Writer, _ map[string]string) error {
+				return cmdCache(ctx, w, cfgPath, false)
+			}},
+		{Name: "cache-clear", Label: "Clear caches", Help: "Empty the shared caches no running runner is using.",
+			Confirm: "Empty the shared runner caches? The next jobs download their tools again.",
+			Run: func(ctx context.Context, w io.Writer, _ map[string]string) error {
+				return cmdCache(ctx, w, cfgPath, true)
+			}},
 		{Name: "config-show", Label: "Show config file", Help: "The file as saved; secrets are never in it.",
 			Run: func(_ context.Context, w io.Writer, _ map[string]string) error { return cmdConfig(w, cfgPath, true) }},
 		{Name: "template-prepare", Label: "Prepare a template", Help: "Install the runner into a container and make it a template.",
@@ -694,6 +714,32 @@ func cmdLogsShip(ctx context.Context, w io.Writer, cfgPath string) error {
 	return nil
 }
 
+func cmdCache(ctx context.Context, w io.Writer, cfgPath string, clear bool) error {
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		return err
+	}
+	mode := cache.List
+	if clear {
+		mode = cache.Clear
+	}
+	res, err := cache.Run(ctx, cfg, host(cfg), mode)
+	if len(res) == 0 && err == nil {
+		fmt.Fprintln(w, "no pool has cache: true")
+	}
+	for _, r := range res {
+		line := fmt.Sprintf("%s  %.1f GB  %s", r.Owner, float64(r.Bytes)/(1<<30), r.Dir)
+		switch {
+		case r.Cleared:
+			line += "  emptied"
+		case r.Skipped != "":
+			line += "  left alone: " + r.Skipped
+		}
+		fmt.Fprintln(w, line)
+	}
+	return err
+}
+
 // cmdConfig validates the config file, and with show prints it as it is on disk.
 func cmdConfig(w io.Writer, cfgPath string, show bool) error {
 	data, err := os.ReadFile(cfgPath)
@@ -873,6 +919,28 @@ func cmdRun(ctx context.Context, cfgPath string) error {
 	}
 	syncImagesAsync(cfg)
 
+	// Measuring a big cache folder takes a while, so it runs beside the loop too.
+	var cacheBusy atomic.Bool
+	trimCaches := func(cfg *config.Config) {
+		if len(cache.Owners(cfg)) == 0 || !cacheBusy.CompareAndSwap(false, true) {
+			return
+		}
+		go func() {
+			defer cacheBusy.Store(false)
+			res, err := cache.Run(ctx, cfg, host(cfg), cache.Trim)
+			for _, r := range res {
+				if r.Cleared {
+					slog.Info("emptied runner cache over cache.max_gb", "owner", r.Owner, "bytes", r.Bytes)
+				} else if r.Skipped != "" {
+					slog.Warn("runner cache over cache.max_gb", "owner", r.Owner, "bytes", r.Bytes, "left_alone", r.Skipped)
+				}
+			}
+			if err != nil && ctx.Err() == nil {
+				slog.Error("runner cache", "err", err)
+			}
+		}()
+	}
+
 	// Shipping runs beside the loop so a slow log endpoint never delays reconcile. Repeated failures
 	// are logged once per distinct error: each logged line would itself be shipped next round.
 	var shipper *logship.Shipper
@@ -944,6 +1012,7 @@ func cmdRun(ctx context.Context, cfgPath string) error {
 			startScaler()
 		case <-imageTick.C:
 			syncImagesAsync(cfg)
+			trimCaches(cfg)
 		case <-logsTick.C:
 			shipLogs()
 		case <-reconcileTick.C:

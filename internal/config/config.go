@@ -48,6 +48,7 @@ type Config struct {
 	Web     Web              `yaml:"web"`
 	// Autoscale listens to GitHub's job queue and starts a runner for each queued job.
 	Autoscale Autoscale      `yaml:"autoscale"`
+	Cache     Cache          `yaml:"cache"`
 	Extra     map[string]any `yaml:",inline"`
 }
 
@@ -107,16 +108,23 @@ func (t Target) Owner() string {
 }
 
 type Pool struct {
-	Type        string        `yaml:"type"`               // lxc | vm (vm arrives in a later phase)
-	Template    int           `yaml:"template,omitempty"` // a template container prepared by hand, or
-	Image       string        `yaml:"image,omitempty"`    // a published image: name, or name@release-tag to pin
-	Mode        string        `yaml:"mode"`               // ephemeral | permanent
-	Labels      []string      `yaml:"labels"`
-	Cores       int           `yaml:"cores"`
-	MemoryMB    int           `yaml:"memory_mb"`
-	DiskGB      int           `yaml:"disk_gb"`
-	Max         int           `yaml:"max"`
-	Min         int           `yaml:"min,omitempty"`
+	Type     string   `yaml:"type"`               // lxc | vm (vm arrives in a later phase)
+	Template int      `yaml:"template,omitempty"` // a template container prepared by hand, or
+	Image    string   `yaml:"image,omitempty"`    // a published image: name, or name@release-tag to pin
+	Mode     string   `yaml:"mode"`               // ephemeral | permanent
+	Labels   []string `yaml:"labels"`
+	Cores    int      `yaml:"cores"`
+	MemoryMB int      `yaml:"memory_mb"`
+	DiskGB   int      `yaml:"disk_gb"`
+	Max      int      `yaml:"max"`
+	Min      int      `yaml:"min,omitempty"`
+	// Warm is how many spare runners are kept ready after a job, so the next one starts at once.
+	// They are removed once no job has come for WarmFor.
+	Warm    int           `yaml:"warm,omitempty"`
+	WarmFor time.Duration `yaml:"warm_for,omitempty"`
+	// Cache mounts the owner's shared cache folder (cache.dir) into each runner, so toolchains and
+	// package downloads survive between jobs.
+	Cache       bool          `yaml:"cache,omitempty"`
 	FullClone   bool          `yaml:"full_clone,omitempty"`
 	MaxLifetime time.Duration `yaml:"max_lifetime,omitempty"`
 	Bridge      string        `yaml:"bridge,omitempty"`
@@ -132,6 +140,14 @@ func (p *Pool) ScaleSetName() string {
 		return p.ScaleSet
 	}
 	return p.Labels[0]
+}
+
+// Cache is the host folder runners of pools with cache: true share: one subfolder per org or account,
+// so one owner's jobs never see another's files. A subfolder over MaxGB is emptied once none of its
+// runners are running.
+type Cache struct {
+	Dir   string `yaml:"dir"`
+	MaxGB int    `yaml:"max_gb"`
 }
 
 // Autoscale controls the job-queue listener. With it off, runners start only with "pve-runners spawn".
@@ -227,6 +243,7 @@ func Default() *Config {
 			Allow: []pve.AllowRule{{Proto: "udp", Port: 53}, {Proto: "tcp", Port: 53}, {Proto: "udp", Port: 67}},
 		},
 		Autoscale: Autoscale{Enabled: true},
+		Cache:     Cache{Dir: "/var/lib/pve-runners/cache", MaxGB: 50},
 		Logs:      Logs{Interval: 15 * time.Second},
 		Web:       Web{Listen: ":8765"},
 		Update: Update{
@@ -326,6 +343,12 @@ func (c *Config) applyDefaults() {
 	if c.Logs.Interval == 0 {
 		c.Logs.Interval = d.Logs.Interval
 	}
+	if c.Cache.Dir == "" {
+		c.Cache.Dir = d.Cache.Dir
+	}
+	if c.Cache.MaxGB == 0 {
+		c.Cache.MaxGB = d.Cache.MaxGB
+	}
 	for i := range c.Targets {
 		if c.Targets[i].PrivateKeyFile == "" && c.Targets[i].Owner() != "" {
 			c.Targets[i].PrivateKeyFile = KeyPath(c.Targets[i].Owner())
@@ -353,6 +376,9 @@ func (c *Config) applyDefaults() {
 		}
 		if p.Max == 0 {
 			p.Max = c.Proxmox.MaxRunners
+		}
+		if p.Warm > 0 && p.WarmFor == 0 {
+			p.WarmFor = 30 * time.Minute
 		}
 		// Always attach a NIC with the firewall flag so isolation holds whatever the template had.
 		if p.Bridge == "" {
@@ -503,6 +529,13 @@ func (c *Config) Validate() error {
 	if c.Logs.Interval < 5*time.Second {
 		add("logs.interval must be at least 5s, got %s", c.Logs.Interval)
 	}
+	// The cache folder gets emptied, so it must be a dedicated folder, never / or a top-level one.
+	if d := filepath.Clean(c.Cache.Dir); !filepath.IsAbs(c.Cache.Dir) || strings.Count(d, "/") < 2 {
+		add("cache.dir %q must be an absolute path at least two folders deep, such as /var/lib/pve-runners/cache", c.Cache.Dir)
+	}
+	if c.Cache.MaxGB < 1 {
+		add("cache.max_gb must be at least 1, got %d", c.Cache.MaxGB)
+	}
 	if c.Images.RetentionDays < 1 {
 		add("images.retention_days must be at least 1, got %d", c.Images.RetentionDays)
 	}
@@ -552,6 +585,12 @@ func (c *Config) Validate() error {
 		}
 		if p.Min > p.Max {
 			add("pools.%s.min (%d) is larger than max (%d)", name, p.Min, p.Max)
+		}
+		if p.Min < 0 || p.Warm < 0 || p.WarmFor < 0 {
+			add("pools.%s: min, warm and warm_for can't be negative", name)
+		}
+		if p.Warm > p.Max {
+			add("pools.%s.warm (%d) is larger than max (%d)", name, p.Warm, p.Max)
 		}
 		for _, l := range p.Labels {
 			if !labelRe.MatchString(l) {

@@ -120,6 +120,12 @@ func hostFields() []section {
 			strList("network.dns", "DNS servers", "Comma-separated; empty copies the host's.",
 				func(c *config.Config) *[]string { return &c.Network.DNS }),
 		}},
+		{"Runner cache", []field{
+			text("cache.dir", "Cache folder", "Host folder for pools with the cache on; one subfolder per org, mounted at /opt/pve-cache.",
+				func(c *config.Config) *string { return &c.Cache.Dir }),
+			number("cache.max_gb", "Max size per org (GB)", "A bigger folder is emptied once none of its runners are running.",
+				func(c *config.Config) *int { return &c.Cache.MaxGB }),
+		}},
 		{"Images", []field{
 			number("images.retention_days", "Keep images (days)", "The newest, pinned and in-use images are always kept.",
 				func(c *config.Config) *int { return &c.Images.RetentionDays }),
@@ -202,6 +208,16 @@ func poolFields() []poolField {
 		num("disk_gb", "Disk (GB)", func(p *config.Pool) *int { return &p.DiskGB }),
 		num("max", "Max runners", func(p *config.Pool) *int { return &p.Max }),
 		num("min", "Min runners", func(p *config.Pool) *int { return &p.Min }),
+		num("warm", "Warm spares after a job", func(p *config.Pool) *int { return &p.Warm }),
+		{Key: "warm_for", Label: "Keep warm spares for (empty for 30m)", Kind: "text",
+			get: func(p *config.Pool) string { return fmtDur(p.WarmFor) },
+			set: func(p *config.Pool, v string) (err error) {
+				p.WarmFor, err = parseDur("warm_for", v)
+				return err
+			}},
+		{Key: "cache", Label: "Shared cache (tools and packages kept between jobs)", Kind: "bool",
+			get: func(p *config.Pool) string { return strconv.FormatBool(p.Cache) },
+			set: func(p *config.Pool, v string) error { p.Cache = v == "on"; return nil }},
 		{Key: "full_clone", Label: "Full clones", Kind: "bool",
 			get: func(p *config.Pool) string { return strconv.FormatBool(p.FullClone) },
 			set: func(p *config.Pool, v string) error { p.FullClone = v == "on"; return nil }},

@@ -148,7 +148,24 @@ pools:{{if not .Pools}} {}{{end}}
     # Most runners of this pool at once (proxmox.max_runners still caps the host).
     max: {{.Max}}
 {{- if .Min}}
+    # Keep this many idle runners ready at all times.
     min: {{.Min}}
+{{- end}}
+{{- if .Warm}}
+    # After a job, keep this many spare runners ready until no job has come for warm_for.
+    warm: {{.Warm}}
+    warm_for: {{dur .WarmFor}}
+{{- else}}
+    # After a job, keep spare runners ready until no job has come for warm_for:
+    # warm: 1
+    # warm_for: 30m
+{{- end}}
+{{- if .Cache}}
+    # Mount the owner's shared cache (cache.dir) so toolchains and package downloads are kept.
+    cache: true
+{{- else}}
+    # Mount the owner's shared cache (cache.dir) so toolchains and package downloads are kept:
+    # cache: true
 {{- end}}
 {{- if .FullClone}}
     full_clone: true
@@ -182,6 +199,14 @@ autoscale:
   # Listen to GitHub's job queue and start a runner for each queued job (outbound HTTPS only).
   # Off: runners start only with "pve-runners spawn".
   enabled: {{.Autoscale.Enabled}}
+
+cache:
+  # Host folder for pools with cache: true, one subfolder per org or account, mounted in runners at
+  # /opt/pve-cache. Holds the actions tool cache (setup-node, setup-go, ...), npm, yarn, pnpm, Go, pip
+  # and Playwright downloads. Every repo of an owner shares it, so only enable it for repos you trust.
+  dir: {{q .Cache.Dir}}
+  # A subfolder bigger than this is emptied once none of its runners are running.
+  max_gb: {{.Cache.MaxGB}}
 
 images:
   # Delete downloaded images and their templates after this many days. The newest image of each

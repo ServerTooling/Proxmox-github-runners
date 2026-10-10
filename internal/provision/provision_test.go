@@ -57,13 +57,13 @@ func TestSpawnRunsExactSequence(t *testing.T) {
 	push := m[6]
 	want := []string{
 		"pct clone 8000 9000 --hostname gh-pve1-small-9000 --pool gh-runners",
-		"pct set 9000 --cores 2 --memory 2048 --tags gh-runner;pool-small;owner-example-org;mode-ephemeral;from-8000;created-1700000000 --onboot 0 --description GitHub Actions runner managed by pve-runners --net0 name=eth0,bridge=vmbr1,ip=dhcp,firewall=1,tag=50",
+		"pct set 9000 --cores 2 --memory 2048 --tags gh-runner;pool-small;owner-example-org;mode-ephemeral;from-8000;created-1700000000;runnerid-1 --onboot 0 --description GitHub Actions runner managed by pve-runners --net0 name=eth0,bridge=vmbr1,ip=dhcp,firewall=1,tag=50",
 		"pct resize 9000 rootfs 40G",
 		"pvesh set /nodes/pve1/lxc/9000/firewall/options --enable 1 --policy_in DROP --policy_out ACCEPT --dhcp 1 --ipfilter 1",
 		"pvesh create /nodes/pve1/lxc/9000/firewall/rules --type group --action gh-runner-egress --enable 1",
 		"pct start 9000",
 		push,
-		"pct exec 9000 -- sh -c timeout 120 systemctl is-system-running --wait >/dev/null 2>&1; exec systemctl start gh-runner.service",
+		"pct exec 9000 -- sh -c " + startRunner,
 	}
 	if !reflect.DeepEqual(m, want) {
 		t.Fatalf("commands\n got %q\nwant %q", m, want)
@@ -301,5 +301,48 @@ func TestSpawnSetsConfiguredDNS(t *testing.T) {
 	}
 	if set := f.Mutations()[1]; !strings.HasSuffix(set, " --nameserver 192.0.2.53 198.51.100.53") {
 		t.Errorf("set: %q", set)
+	}
+}
+
+// A pool with the cache on mounts the owner's folder and points the runner's tools into it.
+func TestSpawnMountsTheOwnersCache(t *testing.T) {
+	p, f, gh := setup(t)
+	gh.RunnerGroups["Example-Org"] = gh.RunnerGroups["example-org"]
+	p.Cfg.Network.Isolate = new(bool)
+	p.Cfg.Pools["small"].Cache = true
+	if _, err := p.Spawn(context.Background(), Request{Pool: "small", Target: org}); err != nil {
+		t.Fatal(err)
+	}
+	m := f.Mutations()
+	if m[1] != "install -d -m 0711 /var/lib/pve-runners/cache" || m[2] != "install -d -m 1777 /var/lib/pve-runners/cache/example-org" {
+		t.Fatalf("folders: %q", m[1:3])
+	}
+	if !strings.HasSuffix(m[3], " --mp0 /var/lib/pve-runners/cache/example-org,mp=/opt/pve-cache") || !strings.HasPrefix(m[3], "pct set 9000 ") {
+		t.Errorf("set: %q", m[3])
+	}
+	env := f.Pushed["9000:/opt/actions-runner/.env"]
+	for _, want := range []string{"RUNNER_TOOL_CACHE=/opt/pve-cache/toolcache\n", "npm_config_cache=/opt/pve-cache/npm\n",
+		"GOMODCACHE=/opt/pve-cache/go/mod\n", "PLAYWRIGHT_BROWSERS_PATH=/opt/pve-cache/ms-playwright\n"} {
+		if !strings.Contains(env, want) {
+			t.Errorf(".env lacks %q:\n%s", want, env)
+		}
+	}
+	// The runner must be started after its .env is in place.
+	if last := m[len(m)-1]; !strings.HasPrefix(last, "pct exec 9000 -- sh -c ") || !strings.HasSuffix(m[len(m)-2], " /opt/actions-runner/.env --perms 0644") {
+		t.Errorf("order: %q", m[len(m)-2:])
+	}
+}
+
+func TestSpawnWithoutCacheMountsNothing(t *testing.T) {
+	p, f, gh := setup(t)
+	gh.RunnerGroups["Example-Org"] = gh.RunnerGroups["example-org"]
+	p.Cfg.Network.Isolate = new(bool)
+	if _, err := p.Spawn(context.Background(), Request{Pool: "small", Target: org}); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range f.Mutations() {
+		if strings.Contains(c, "pve-cache") || strings.HasPrefix(c, "install ") {
+			t.Errorf("cache touched: %q", c)
+		}
 	}
 }

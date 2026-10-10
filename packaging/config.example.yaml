@@ -40,7 +40,10 @@ pools:
     mode: ephemeral                # permanent is reserved for later
     labels: [proxmox]              # workflows use `runs-on: proxmox`
     # scale_set: proxmox           # GitHub scale set name (what runs-on matches); defaults to the first label
-    # min: 1                       # keep this many idle runners ready
+    # min: 1                       # keep this many idle runners ready at all times
+    # warm: 1                      # after a job, keep this many spare runners ready...
+    # warm_for: 30m                # ...until no job has come for this long
+    # cache: true                  # share tool and package downloads between jobs (see cache: below)
     cores: 4
     memory_mb: 8192
     disk_gb: 40
@@ -50,6 +53,10 @@ pools:
 
 autoscale:
   enabled: true                    # start a runner for each queued job; off = only `pve-runners spawn`
+
+cache:
+  dir: /var/lib/pve-runners/cache  # pools with cache: true; one subfolder per org, mounted at /opt/pve-cache
+  max_gb: 50                       # a bigger subfolder is emptied once none of its runners are running
 
 images:
   retention_days: 30               # age out downloaded images; the newest per name, pinned ones and
