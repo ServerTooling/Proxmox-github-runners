@@ -211,6 +211,40 @@ func (h *Host) Runners(ctx context.Context) ([]Guest, error) {
 	return out, nil
 }
 
+// PoolsGetCmd lists the cluster's resource pools.
+func PoolsGetCmd() Cmd { return Cmd{"pvesh", []string{"get", "/pools", "--output-format", "json"}} }
+
+// PoolCreateCmd creates a resource pool; pct refuses --pool for one that doesn't exist.
+func PoolCreateCmd(pool string) Cmd {
+	return Cmd{"pvesh", []string{"create", "/pools", "--poolid", pool, "--comment", "GitHub runners managed by pve-runners"}}
+}
+
+// EnsurePool creates the resource pool runners and templates go in, unless it already exists.
+func (h *Host) EnsurePool(ctx context.Context, pool string) error {
+	if pool == "" {
+		return nil
+	}
+	out, err := h.run(ctx, PoolsGetCmd())
+	if err != nil {
+		return err
+	}
+	var pools []struct {
+		PoolID string `json:"poolid"`
+	}
+	if err := json.Unmarshal(out, &pools); err != nil {
+		return fmt.Errorf("parse pool list: %w", err)
+	}
+	for _, p := range pools {
+		if p.PoolID == pool {
+			return nil
+		}
+	}
+	if err := h.Exec(ctx, PoolCreateCmd(pool)); err != nil {
+		return fmt.Errorf("create resource pool %s: %w", pool, err)
+	}
+	return nil
+}
+
 // NextFreeID picks the lowest unused ID in the reserved range, looking at every guest in the cluster.
 func (h *Host) NextFreeID(ctx context.Context) (int, error) { return h.NextFreeIDIn(ctx, h.VMIDRange) }
 

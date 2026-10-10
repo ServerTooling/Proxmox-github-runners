@@ -147,6 +147,20 @@ func TestEnsureDownloadsVerifiesAndCreatesTemplate(t *testing.T) {
 	}
 }
 
+func TestEnsureCreatesMissingResourcePool(t *testing.T) {
+	f := newFixture(t)
+	f.pve.ResourcePools = nil
+	f.publish("template-ubuntu-latest-20261008-2", "ubuntu-latest", now-100000, false)
+	if _, err := f.m.Ensure(context.Background(), ParseRef("ubuntu-latest")); err != nil {
+		t.Fatal(err)
+	}
+	m := f.pve.Mutations()
+	if m[0] != "pvesh create /pools --poolid gh-runners --comment GitHub runners managed by pve-runners" ||
+		!strings.HasPrefix(m[1], "pct create 8900 ") {
+		t.Fatalf("commands: %q", m)
+	}
+}
+
 func TestEnsureRefusesUnverifiedImages(t *testing.T) {
 	f := newFixture(t)
 	f.publish("template-ubuntu-latest-20261008-2", "ubuntu-latest", now, true)

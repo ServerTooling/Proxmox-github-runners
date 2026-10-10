@@ -38,6 +38,28 @@ func TestCommandBuildersExactArgv(t *testing.T) {
 	}
 }
 
+func TestEnsurePool(t *testing.T) {
+	f := pvetest.New()
+	h := &pve.Host{R: f, Node: "pve1", VMIDRange: [2]int{9000, 9010}}
+	ctx := context.Background()
+	if err := h.EnsurePool(ctx, "gh-runners"); err != nil || len(f.Mutations()) != 0 {
+		t.Fatalf("existing pool: %v %q", err, f.Mutations())
+	}
+	if err := h.EnsurePool(ctx, "ci"); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.EnsurePool(ctx, "ci"); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"pvesh create /pools --poolid ci --comment GitHub runners managed by pve-runners"}
+	if !reflect.DeepEqual(f.Mutations(), want) {
+		t.Fatalf("got %q", f.Mutations())
+	}
+	if got := pve.PoolsGetCmd().String(); got != "pvesh get /pools --output-format json" {
+		t.Errorf("list: %q", got)
+	}
+}
+
 func TestParseGuestsAndTags(t *testing.T) {
 	gs, err := pve.ParseGuests([]byte(`[{"vmid":9001,"name":"gh","node":"pve1","type":"lxc","status":"running","tags":"gh-runner;pool-small","template":0}]`))
 	if err != nil {

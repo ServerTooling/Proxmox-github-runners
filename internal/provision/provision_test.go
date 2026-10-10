@@ -273,3 +273,20 @@ func TestConcurrentSpawnsRespectCapacity(t *testing.T) {
 		t.Fatalf("%d started, %d refused; pool max is 2", ok, full)
 	}
 }
+
+func TestSpawnCreatesMissingResourcePool(t *testing.T) {
+	p, f, _ := setup(t)
+	p.Cfg.Network.Isolate = new(bool)
+	f.ResourcePools = nil
+	jit := func(context.Context, string) (*github.JITConfig, error) {
+		return &github.JITConfig{EncodedJITConfig: "x"}, nil
+	}
+	if _, err := p.Spawn(context.Background(), Request{Pool: "small", Target: org, JIT: jit}); err != nil {
+		t.Fatal(err)
+	}
+	m := f.Mutations()
+	if m[0] != "pvesh create /pools --poolid gh-runners --comment GitHub runners managed by pve-runners" ||
+		!strings.HasPrefix(m[1], "pct clone 8000 9000 ") {
+		t.Fatalf("commands: %q", m)
+	}
+}
