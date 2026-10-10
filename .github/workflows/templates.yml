@@ -64,7 +64,11 @@ jobs:
 
       - name: Pin and verify actions/runner
         run: |
-          RV=$(tr -d ' \n' < packaging/runner-version)
+          pinned=$(tr -d ' \n' < packaging/runner-version)
+          latest=$(gh api repos/actions/runner/releases/latest --jq .tag_name) || latest=""
+          # GitHub stops sending jobs to deprecated runner versions, so always take the newest release;
+          # packaging/runner-version is the floor and the fallback if the lookup fails.
+          RV=$(printf '%s\n' "$pinned" "${latest#v}" | grep . | sort -V | tail -1)
           notes=$(gh api "repos/actions/runner/releases/tags/v$RV" --jq .body)
           curl -fsSL -o runner.tgz "https://github.com/actions/runner/releases/download/v$RV/actions-runner-linux-x64-$RV.tar.gz"
           sha=$(sha256sum runner.tgz | cut -d' ' -f1)

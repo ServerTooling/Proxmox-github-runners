@@ -7,7 +7,8 @@ var (
 	// UpdatePublicKey is the base64 DER (SPKI) ed25519 key that release SHA256SUMS files are signed with.
 	UpdatePublicKey = ""
 	// RunnerVersion and RunnerSHA256 pin the actions/runner linux tarball; CI reads them from
-	// packaging/runner-version and verifies the hash against the upstream release before stamping.
+	// the newest actions/runner release (packaging/runner-version is the floor) and verifies the hash
+	// against the upstream release notes before stamping.
 	RunnerVersion = ""
 	RunnerSHA256  = ""
 )
