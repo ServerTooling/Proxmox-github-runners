@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/ServerTooling/proxmox-github-runners/internal/pve"
@@ -57,6 +58,36 @@ func TestEnsurePool(t *testing.T) {
 	}
 	if got := pve.PoolsGetCmd().String(); got != "pvesh get /pools --output-format json" {
 		t.Errorf("list: %q", got)
+	}
+}
+
+func TestRootfsStorage(t *testing.T) {
+	f := pvetest.New()
+	f.Storages = append(f.Storages,
+		pve.Storage{Name: "big-dir", Type: "dir", Content: "rootdir,images", Active: 1, Avail: 900 << 30},
+		pve.Storage{Name: "local-zfs", Type: "zfspool", Content: "images,rootdir", Active: 1, Avail: 500 << 30},
+		pve.Storage{Name: "offline", Type: "zfspool", Content: "rootdir", Active: 0, Avail: 999 << 30})
+	h := &pve.Host{R: f, Node: "pve1", VMIDRange: [2]int{9000, 9010}}
+	ctx := context.Background()
+
+	// Linked-clone storages beat a bigger directory storage; among them, the most free space wins.
+	if s, err := h.RootfsStorage(ctx, ""); err != nil || s != "local-zfs" {
+		t.Fatalf("auto: %q, %v", s, err)
+	}
+	if f.Calls[0] != "pvesh get /nodes/pve1/storage --content rootdir --output-format json" {
+		t.Errorf("command: %q", f.Calls[0])
+	}
+	if s, err := h.RootfsStorage(ctx, "big-dir"); err != nil || s != "big-dir" {
+		t.Fatalf("configured: %q, %v", s, err)
+	}
+	_, err := h.RootfsStorage(ctx, "local")
+	if err == nil || !strings.Contains(err.Error(), `proxmox.storage "local" can't hold containers`) ||
+		!strings.Contains(err.Error(), "ones that can: local-zfs, local-lvm, big-dir") {
+		t.Fatalf("err = %v", err)
+	}
+	f.Storages = nil
+	if _, err := h.RootfsStorage(ctx, ""); err == nil || !strings.Contains(err.Error(), "no active storage") {
+		t.Fatalf("none: %v", err)
 	}
 }
 

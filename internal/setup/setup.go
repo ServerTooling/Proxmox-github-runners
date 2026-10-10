@@ -81,6 +81,9 @@ type Server struct {
 	HTTP       *http.Client
 	Token      string
 	Done       chan struct{}
+	// Storages are the node's storages that can hold containers, best first, offered for
+	// proxmox.storage.
+	Storages []string
 
 	mu     sync.Mutex
 	apps   map[string]*appState // by owner (lowercase)
@@ -157,6 +160,8 @@ func (s *Server) saveHost(w http.ResponseWriter, r *http.Request) {
 	if b := strings.TrimSpace(r.FormValue("bridge")); b != "" {
 		s.Cfg.Proxmox.Bridge = b
 	}
+	// Empty means pick automatically at run time.
+	s.Cfg.Proxmox.Storage = strings.TrimSpace(r.FormValue("storage"))
 	p := s.Cfg.Pools["default"]
 	if p == nil {
 		p = &config.Pool{Type: "lxc", Mode: "ephemeral", Labels: []string{"proxmox"}}
@@ -278,6 +283,14 @@ func (s *Server) appInstalled(w http.ResponseWriter, r *http.Request) {
 func (s *Server) addTarget(ctx context.Context, c *github.Client, a appState, in github.Installation) error {
 	t := config.Target{AppID: a.ID, AppSlug: a.Slug, InstallationID: in.ID, Pools: []string{"default"},
 		PrivateKeyFile: filepath.Join(s.KeyDir, strings.ToLower(a.Owner)+".pem")}
+	// The org App asks for org runner permissions, which mean nothing on a personal account (and
+	// the reverse lacks them), so the account type must match the button that was used.
+	if a.Org && in.Account.Type == "User" {
+		return fmt.Errorf("%s is a personal account, not an org; remove this App and use \"Create App for my account\" instead", in.Account.Login)
+	}
+	if !a.Org && in.Account.Type == "Organization" {
+		return fmt.Errorf("%s is an org; remove this App and use \"Create App for org\" instead", in.Account.Login)
+	}
 	if a.Org {
 		t.Org = in.Account.Login
 	} else {
@@ -347,7 +360,7 @@ func (s *Server) index(w http.ResponseWriter, r *http.Request) {
 	if p := s.Cfg.Pools["default"]; p != nil {
 		tpl = p.Template
 	}
-	render(w, indexTmpl, map[string]any{"Cfg": s.Cfg, "Template": tpl, "Error": s.errMsg})
+	render(w, indexTmpl, map[string]any{"Cfg": s.Cfg, "Template": tpl, "Error": s.errMsg, "Storages": s.Storages})
 }
 
 func render(w http.ResponseWriter, t *template.Template, data any) {
@@ -373,6 +386,10 @@ var indexTmpl = template.Must(template.New("index").Parse(page + `
 Or enter a container you prepared with <code>pve-runners template prepare</code>, outside IDs {{index .Cfg.Proxmox.VMIDRange 0}}-{{index .Cfg.Proxmox.VMIDRange 1}}.</small></p>
 <p><label>Network bridge for runners <input name="bridge" value="{{.Cfg.Proxmox.Bridge}}" size="8"></label><br>
 <small>Runners get internet access through this bridge; the LAN stays blocked by the firewall.</small></p>
+<p><label>Storage for container disks <input name="storage" value="{{.Cfg.Proxmox.Storage}}" size="12" list="storages" placeholder="automatic"></label><br>
+<datalist id="storages">{{range .Storages}}<option value="{{.}}">{{end}}</datalist>
+<small>{{if .Storages}}Storages here that can hold containers: {{range $i, $s := .Storages}}{{if $i}}, {{end}}<code>{{$s}}</code>{{end}}.
+Leave empty to use <code>{{index .Storages 0}}</code>.{{else}}Leave empty to pick one that can hold containers automatically.{{end}}</small></p>
 <p><label>Max runners at once <input name="max_runners" value="{{.Cfg.Proxmox.MaxRunners}}" size="3"></label></p>
 <button>Save</button></fieldset></form>
 

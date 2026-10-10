@@ -245,7 +245,24 @@ func githubFor(cfg *config.Config) func(config.Target) (provision.JITSource, err
 	return func(t config.Target) (provision.JITSource, error) { return appClient(cfg, t) }
 }
 
+// withStorage checks proxmox.storage can hold containers, or picks one when it is empty, so a bad
+// setting fails here naming the storages that would work instead of deep inside pct. It returns a
+// copy: the image sync and the autoscaler resolve concurrently from the same loaded config.
+func withStorage(ctx context.Context, cfg *config.Config) (*config.Config, error) {
+	s, err := host(cfg).RootfsStorage(ctx, cfg.Proxmox.Storage)
+	if err != nil {
+		return nil, err
+	}
+	c := *cfg
+	c.Proxmox.Storage = s
+	return &c, nil
+}
+
 func imageManager(ctx context.Context, cfg *config.Config) (*images.Manager, error) {
+	cfg, err := withStorage(ctx, cfg)
+	if err != nil {
+		return nil, err
+	}
 	h := host(cfg)
 	probe, err := h.VolumePath(ctx, cfg.Images.CacheStorage+":vztmpl/probe.tar.zst")
 	if err != nil {
@@ -272,6 +289,10 @@ func imageRefs(cfg *config.Config) []images.Ref {
 }
 
 func provisioner(ctx context.Context, cfg *config.Config) (*provision.Provisioner, error) {
+	cfg, err := withStorage(ctx, cfg)
+	if err != nil {
+		return nil, err
+	}
 	p := &provision.Provisioner{Cfg: cfg, Host: host(cfg), GitHub: githubFor(cfg), Now: time.Now, TmpDir: os.TempDir()}
 	if len(imageRefs(cfg)) > 0 {
 		m, err := imageManager(ctx, cfg)
@@ -367,6 +388,11 @@ func cmdSetup(ctx context.Context, cfgPath, listen string, openFirewall bool) er
 	s, err := setup.NewServer(cfg, cfgPath)
 	if err != nil {
 		return err
+	}
+	if list, err := host(cfg).RootdirStorages(ctx); err == nil {
+		for _, st := range list {
+			s.Storages = append(s.Storages, st.Name)
+		}
 	}
 	ln, err := net.Listen("tcp", listen)
 	if err != nil {
@@ -524,6 +550,11 @@ func cmdStatus(ctx context.Context, cfgPath string) error {
 	w.Flush()
 	for _, a := range reconcile.Plan(cfg, runners, time.Now()) {
 		fmt.Printf("pending cleanup: %d (%s)\n", a.VMID, a.Reason)
+	}
+	if st, err := h.RootfsStorage(ctx, cfg.Proxmox.Storage); err != nil {
+		fmt.Println("warning:", err)
+	} else {
+		fmt.Println("container storage:", st)
 	}
 	if on, err := h.ClusterFirewallEnabled(ctx); err == nil && !on && cfg.Network.Isolated() {
 		fmt.Println("warning: the datacenter firewall is off; runners cannot be isolated from the LAN, so spawning is refused")

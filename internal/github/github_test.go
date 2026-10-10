@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/ServerTooling/proxmox-github-runners/internal/github"
@@ -72,6 +73,15 @@ func TestPublicReposAndGroupsAreRefused(t *testing.T) {
 	}
 	if len(f.JITRequests) != 0 {
 		t.Fatal("no runner may be registered for a public repo")
+	}
+}
+
+func TestRunnerGroupsOfAPersonalAccountExplainsTheFix(t *testing.T) {
+	f := githubtest.New(42)
+	defer f.Close()
+	_, err := github.NewClient(f.URL, 42, f.Key).RunnerGroupID(context.Background(), 5, "someone", "")
+	if err == nil || !strings.Contains(err.Error(), "404") || !strings.Contains(err.Error(), "is someone a personal account?") {
+		t.Fatalf("err = %v", err)
 	}
 }
 

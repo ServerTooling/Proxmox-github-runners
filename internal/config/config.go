@@ -50,9 +50,10 @@ type Config struct {
 type Proxmox struct {
 	Node string `yaml:"node"`
 	// MaxRunners caps runner guests on this host across all pools and orgs.
-	MaxRunners      int    `yaml:"max_runners"`
-	VMIDRange       [2]int `yaml:"vmid_range"`
-	Pool            string `yaml:"pool"`
+	MaxRunners int    `yaml:"max_runners"`
+	VMIDRange  [2]int `yaml:"vmid_range"`
+	Pool       string `yaml:"pool"`
+	// Storage holds container root disks; empty picks the best one that can (see pve.RootfsStorage).
 	Storage         string `yaml:"storage"`
 	MinFreeMemoryMB int    `yaml:"min_free_memory_mb"`
 	// Bridge is the network bridge runner NICs (and image templates) attach to; a pool can override it.
@@ -175,7 +176,7 @@ type Update struct {
 func Default() *Config {
 	return &Config{
 		Version: CurrentVersion,
-		Proxmox: Proxmox{MaxRunners: 4, VMIDRange: [2]int{9000, 9499}, Pool: "gh-runners", Storage: "local-lvm", MinFreeMemoryMB: 2048,
+		Proxmox: Proxmox{MaxRunners: 4, VMIDRange: [2]int{9000, 9499}, Pool: "gh-runners", MinFreeMemoryMB: 2048,
 			Bridge: "vmbr0"},
 		GitHub: GitHub{
 			APIURL:        "https://api.github.com",
@@ -236,9 +237,6 @@ func (c *Config) applyDefaults() {
 	}
 	if c.Proxmox.Pool == "" {
 		c.Proxmox.Pool = d.Proxmox.Pool
-	}
-	if c.Proxmox.Storage == "" {
-		c.Proxmox.Storage = d.Proxmox.Storage
 	}
 	if c.Proxmox.Bridge == "" {
 		c.Proxmox.Bridge = d.Proxmox.Bridge
