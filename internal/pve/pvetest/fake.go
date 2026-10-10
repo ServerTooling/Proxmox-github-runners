@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/ServerTooling/proxmox-github-runners/internal/pve"
 )
@@ -28,6 +29,8 @@ type Fake struct {
 	Group    []map[string]any
 	// NodeRules are the host firewall rules (pos, comment, dport).
 	NodeRules []map[string]any
+	// Delay makes every command take this long, so concurrent callers interleave like on a real host.
+	Delay time.Duration
 }
 
 func New(guests ...pve.Guest) *Fake {
@@ -35,6 +38,7 @@ func New(guests ...pve.Guest) *Fake {
 }
 
 func (f *Fake) Run(_ context.Context, name string, args ...string) ([]byte, error) {
+	time.Sleep(f.Delay)
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	line := name + " " + strings.Join(args, " ")

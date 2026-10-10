@@ -8,14 +8,18 @@ built in this repo's CI (Ubuntu 24.04 with Python, Go, Node, Helm, kubectl and D
 Runners get internet access but no access to your LAN. The service keeps itself updated from this
 repository's releases.
 
-> Status: Phase 2. Runners are created on demand with `pve-runners spawn` from CI-built images;
-> automatic scaling from GitHub's job queue is next. See [docs/plan.md](docs/plan.md).
+> Status: Phase 3. Runners start automatically for queued jobs, from CI-built images. See
+> [docs/plan.md](docs/plan.md).
 
 ## How it works
 
 - **GitHub:** setup creates one private GitHub App per org you manage (GitHub's App-manifest flow,
   so all permissions are pre-filled) and stores its key in `/etc/pve-runners/apps/`. Nothing
   connects into your network; the tool only makes outbound calls.
+- **Autoscaling:** each pool becomes a GitHub *runner scale set* per org, named after its first
+  label. The service holds a long-poll on GitHub's job queue (outbound HTTPS only), claims queued
+  jobs from private repositories, and starts one runner per assigned job, up to the pool's `max`
+  and `proxmox.max_runners`. Restarting the service picks up the runners already running.
 - **Runners:** `pct clone` of your template into the reserved ID range, tagged `gh-runner`, firewall
   on, single-use runner config pushed in, runner started. The runner takes one job and powers the
   container off; the reconcile loop destroys it within 30 seconds.
@@ -51,15 +55,20 @@ explaining each one (an existing config is never overwritten). Then:
    image.
 3. **Start:** `systemctl enable --now pve-runners`. The service downloads the image and creates its
    template right away (`pve-runners images list` shows it).
-4. **Use it:** `runs-on: proxmox` in a workflow, then `pve-runners spawn --owner your-org` to start a
-   runner for it.
+4. **Use it:** `runs-on: proxmox` in a workflow of a private repo. The job shows as queued, a runner
+   starts within seconds of the container booting, and it is destroyed after the job. Use the bare
+   label: scale sets match `runs-on` by name, so `[self-hosted, proxmox]` won't pick them up.
+
+Each scale set can be served by one host at a time. To run several hosts for the same org, give
+each host's pools a different `scale_set` (or labels).
 
 ## Commands
 
 | Command | What it does |
 | --- | --- |
 | `pve-runners setup` | One-time setup page; re-run to add orgs |
-| `pve-runners spawn --owner ORG [--pool default] [--repo R]` | Start one ephemeral runner |
+| `pve-runners run` | The service (systemd runs it): autoscaling, cleanup, images, self-update |
+| `pve-runners spawn --owner ORG [--pool default] [--repo R]` | Start one ephemeral runner by hand |
 | `pve-runners status` | Runners on this host and pending cleanup |
 | `pve-runners reconcile` | Destroy finished or expired runners now |
 | `pve-runners images list\|pull\|prune` | Show image templates, fetch pools' images now, age out old ones |

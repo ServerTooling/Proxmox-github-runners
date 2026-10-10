@@ -38,12 +38,17 @@ pools:
     # template: 8000               # or instead a container made by `pve-runners template prepare --ctid 8000`
     mode: ephemeral                # permanent is reserved for later
     labels: [proxmox]              # workflows use `runs-on: proxmox`
+    # scale_set: proxmox           # GitHub scale set name (what runs-on matches); defaults to the first label
+    # min: 1                       # keep this many idle runners ready
     cores: 4
     memory_mb: 8192
     disk_gb: 40
     # max_lifetime: 6h             # destroy runners older than this
     # bridge: vmbr4                # override proxmox.bridge for this pool, and an optional VLAN
     # vlan: 50
+
+autoscale:
+  enabled: true                    # start a runner for each queued job; off = only `pve-runners spawn`
 
 images:
   retention_days: 30               # age out downloaded images; the newest per name, pinned ones and

@@ -307,6 +307,25 @@ func (c *Client) RepoJITConfig(ctx context.Context, inst int64, owner, repo stri
 	return &out, c.asInstallation(ctx, inst, http.MethodPost, path, req, &out)
 }
 
+// RegistrationToken returns a one-hour runner registration token for an org (repo == "") or a
+// repository. The scale set client trades it for an Actions service session.
+func (c *Client) RegistrationToken(ctx context.Context, inst int64, owner, repo string) (string, error) {
+	path := "/orgs/" + url.PathEscape(owner) + "/actions/runners/registration-token"
+	if repo != "" {
+		path = "/repos/" + url.PathEscape(owner) + "/" + url.PathEscape(repo) + "/actions/runners/registration-token"
+	}
+	var out struct {
+		Token string `json:"token"`
+	}
+	if err := c.asInstallation(ctx, inst, http.MethodPost, path, nil, &out); err != nil {
+		return "", err
+	}
+	if out.Token == "" {
+		return "", fmt.Errorf("github %s: empty registration token", path)
+	}
+	return out.Token, nil
+}
+
 // AppCredentials is what GitHub returns once when an App is created from a manifest.
 type AppCredentials struct {
 	ID            int64   `json:"id"`

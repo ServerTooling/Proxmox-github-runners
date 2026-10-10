@@ -175,6 +175,8 @@ func TestRenderRoundTripsAndDocumentsEverySetting(t *testing.T) {
     vlan: 50
     full_clone: true
     min: 1
+    scale_set: pve-img
+autoscale: {enabled: false}
 network:
   allow: [{proto: udp, port: 53, dest: 192.0.2.1}]
 notify: {webhook_url_file: /etc/pve-runners/notify-url, format: ntfy}
@@ -200,7 +202,7 @@ github: {runner_version: "9.9.9", runner_sha256: abc}
 	}
 	img := back.Pools["img"]
 	if img.Image != "ubuntu-latest@template-ubuntu-latest-20261012-5" || img.MaxLifetime != 6*time.Hour || img.VLAN != 50 ||
-		!img.FullClone || img.Min != 1 || back.Notify.Format != "ntfy" || !back.GitHub.Pinned() ||
+		!img.FullClone || img.Min != 1 || img.ScaleSetName() != "pve-img" || back.Autoscale.Enabled || back.Notify.Format != "ntfy" || !back.GitHub.Pinned() ||
 		back.Network.Allow[0].Dest != "192.0.2.1" || back.Targets[1].Repos[0] != "side" {
 		t.Fatalf("values lost: %+v %+v", img, back)
 	}
@@ -261,5 +263,27 @@ func TestPoolBridgeFollowsHostBridgeUnlessOverridden(t *testing.T) {
 	}
 	if back.Proxmox.Bridge != "vmbr4" || back.Pools["default"].Bridge != "vmbr4" {
 		t.Fatalf("host %q pool %q", back.Proxmox.Bridge, back.Pools["default"].Bridge)
+	}
+}
+
+func TestAutoscaleDefaultsAndScaleSetNames(t *testing.T) {
+	c, _, err := Parse([]byte(valid))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !c.Autoscale.Enabled || c.Pools["small"].ScaleSetName() != "proxmox" {
+		t.Fatalf("autoscale %v, scale set %q", c.Autoscale.Enabled, c.Pools["small"].ScaleSetName())
+	}
+	_, _, err = Parse([]byte(strings.Replace(valid, "pools: [small]", "pools: [small, big]", 1) + `
+  big:
+    template: 8001
+    labels: [Proxmox]
+`))
+	if err == nil || !strings.Contains(err.Error(), `pools small and big both use scale set "proxmox"`) {
+		t.Fatalf("err = %v", err)
+	}
+	_, _, err = Parse([]byte(strings.Replace(valid, "labels: [proxmox, lxc-small]", "labels: []", 1)))
+	if err == nil || !strings.Contains(err.Error(), "pools.small needs a label") {
+		t.Fatalf("err = %v", err)
 	}
 }

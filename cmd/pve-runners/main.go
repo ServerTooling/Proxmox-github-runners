@@ -46,7 +46,7 @@ Usage:
   pve-runners setup [--listen :8765] [--open-firewall]
                                               first-run setup page (GitHub Apps, orgs, template);
                                               --open-firewall allows the port until setup ends
-  pve-runners run                             the service: reconcile + self-update loops
+  pve-runners run                             the service: autoscaling, reconcile, image and self-update loops
   pve-runners spawn --pool NAME --owner ORG [--repo NAME]
                                               create one ephemeral runner now
   pve-runners reconcile                       destroy finished or expired runners once
@@ -228,19 +228,21 @@ func updater(cfg *config.Config) *update.Updater {
 		}}
 }
 
-// githubFor builds the App client for a target from its own key file.
-func githubFor(cfg *config.Config) func(config.Target) (provision.JITSource, error) {
-	return func(t config.Target) (provision.JITSource, error) {
-		pem, err := os.ReadFile(t.PrivateKeyFile)
-		if err != nil {
-			return nil, fmt.Errorf("App key for %s: %w", t.Owner(), err)
-		}
-		key, err := github.ParsePrivateKey(pem)
-		if err != nil {
-			return nil, err
-		}
-		return github.NewClient(cfg.GitHub.APIURL, t.AppID, key), nil
+// appClient builds the App client for a target from its own key file.
+func appClient(cfg *config.Config, t config.Target) (*github.Client, error) {
+	pem, err := os.ReadFile(t.PrivateKeyFile)
+	if err != nil {
+		return nil, fmt.Errorf("App key for %s: %w", t.Owner(), err)
 	}
+	key, err := github.ParsePrivateKey(pem)
+	if err != nil {
+		return nil, err
+	}
+	return github.NewClient(cfg.GitHub.APIURL, t.AppID, key), nil
+}
+
+func githubFor(cfg *config.Config) func(config.Target) (provision.JITSource, error) {
+	return func(t config.Target) (provision.JITSource, error) { return appClient(cfg, t) }
 }
 
 func imageManager(ctx context.Context, cfg *config.Config) (*images.Manager, error) {
@@ -628,6 +630,20 @@ func cmdRun(ctx context.Context, cfgPath string) error {
 		}()
 	}
 	syncImagesAsync(cfg)
+
+	// Listeners that failed to start (say, a missing key file) are retried on the reconcile tick.
+	var scaler *autoscaler
+	startScaler := func() {
+		if scaler != nil {
+			return
+		}
+		var err error
+		if scaler, err = startAutoscale(ctx, cfg, n); err != nil {
+			slog.Error("autoscale", "err", err)
+		}
+	}
+	startScaler()
+	defer func() { scaler.stop() }()
 	for {
 		select {
 		case <-ctx.Done():
@@ -641,9 +657,13 @@ func cmdRun(ctx context.Context, cfgPath string) error {
 			cfg = c
 			slog.Info("config reloaded")
 			syncImagesAsync(cfg)
+			scaler.stop()
+			scaler = nil
+			startScaler()
 		case <-imageTick.C:
 			syncImagesAsync(cfg)
 		case <-reconcileTick.C:
+			startScaler()
 			done, err := reconcile.Once(ctx, cfg, host(cfg), time.Now())
 			for _, a := range done {
 				slog.Info("destroyed runner", "vmid", a.VMID, "reason", a.Reason)

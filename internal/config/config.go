@@ -42,7 +42,9 @@ type Config struct {
 	Images  Images           `yaml:"images"`
 	Network Network          `yaml:"network"`
 	Notify  Notify           `yaml:"notify"`
-	Extra   map[string]any   `yaml:",inline"`
+	// Autoscale listens to GitHub's job queue and starts a runner for each queued job.
+	Autoscale Autoscale      `yaml:"autoscale"`
+	Extra     map[string]any `yaml:",inline"`
 }
 
 type Proxmox struct {
@@ -109,6 +111,22 @@ type Pool struct {
 	MaxLifetime time.Duration `yaml:"max_lifetime,omitempty"`
 	Bridge      string        `yaml:"bridge,omitempty"`
 	VLAN        int           `yaml:"vlan,omitempty"`
+	// ScaleSet names the pool's GitHub runner scale set, which is what "runs-on:" matches; it
+	// defaults to the first label.
+	ScaleSet string `yaml:"scale_set,omitempty"`
+}
+
+// ScaleSetName is the scale set the autoscaler registers this pool's runners in.
+func (p *Pool) ScaleSetName() string {
+	if p.ScaleSet != "" || len(p.Labels) == 0 {
+		return p.ScaleSet
+	}
+	return p.Labels[0]
+}
+
+// Autoscale controls the job-queue listener. With it off, runners start only with "pve-runners spawn".
+type Autoscale struct {
+	Enabled bool `yaml:"enabled"`
 }
 
 // Network isolates runner guests: internet access yes, LAN no. Enforced with a Proxmox cluster
@@ -173,6 +191,7 @@ func Default() *Config {
 			// the router on the LAN. Only those ports are let through.
 			Allow: []pve.AllowRule{{Proto: "udp", Port: 53}, {Proto: "tcp", Port: 53}, {Proto: "udp", Port: 67}},
 		},
+		Autoscale: Autoscale{Enabled: true},
 		Update: Update{
 			Enabled: true, Channel: "edge", Interval: 15 * time.Minute,
 			Repo: "ServerTooling/proxmox-github-runners",
@@ -480,6 +499,9 @@ func (c *Config) Validate() error {
 				add("pools.%s has invalid label %q", name, l)
 			}
 		}
+		if ss := p.ScaleSetName(); ss != "" && !labelRe.MatchString(ss) {
+			add("pools.%s.scale_set %q may only use letters, digits, '.', '_' and '-'", name, ss)
+		}
 	}
 	for i, t := range c.Targets {
 		if (t.Org == "") == (t.User == "") {
@@ -494,10 +516,23 @@ func (c *Config) Validate() error {
 		if t.User != "" && len(t.Repos) == 0 {
 			add("targets[%d] (%s) is a personal account; list its repos (personal accounts have no org runners)", i, t.User)
 		}
+		scaleSets := map[string]string{}
 		for _, pn := range t.Pools {
-			if _, ok := c.Pools[pn]; !ok {
+			p, ok := c.Pools[pn]
+			if !ok {
 				add("targets[%d] (%s) uses unknown pool %q", i, t.Owner(), pn)
+				continue
 			}
+			// One target's pools share its runner group, where scale set names must be unique.
+			ss := strings.ToLower(p.ScaleSetName())
+			if ss == "" {
+				add("pools.%s needs a label (workflows pick a pool with runs-on: <label>)", pn)
+				continue
+			}
+			if other, dup := scaleSets[ss]; dup {
+				add("targets[%d] (%s): pools %s and %s both use scale set %q; set scale_set on one of them", i, t.Owner(), other, pn, ss)
+			}
+			scaleSets[ss] = pn
 		}
 	}
 	return errors.Join(errs...)

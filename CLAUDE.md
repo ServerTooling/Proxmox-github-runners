@@ -27,6 +27,10 @@ SKIP_ROLES=go,helm templates/build.sh ubuntu-latest /tmp/out    # local image bu
 - `internal/github`: hand-written App client (JWT, installation tokens, JIT configs, manifest
   conversion). Tests assert exact request bodies against `githubtest.Fake`.
 - `internal/provision`, `internal/reconcile`: spawn and cleanup; state lives only in guest tags.
+- `internal/scaleset`: hand-written client for GitHub's runner scale set API (registration-token
+  exchange, scale sets, message sessions, job acquire, JIT); tests assert exact requests against
+  `scalesettest.Fake`. `internal/autoscale`: one listener per target x pool (x repo for personal
+  accounts) that claims private-repo jobs and spawns runners tagged `scaleset-<id>`.
 - `internal/setup`: one-time setup page (manifest flow, one private App per org).
 - `internal/images`: published runner images: resolve release, verify signed SHA256SUMS, cache in
   the vztmpl dir, `pct create` a template in `images.vmid_range`, prune by age. `pve.OwnedTemplate`
