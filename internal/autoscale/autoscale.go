@@ -140,6 +140,10 @@ func (l *Listener) Run(ctx context.Context) error {
 		if msg != nil {
 			lastID = msg.ID
 			if err := l.handle(ctx, sess, msg); err != nil {
+				if ctx.Err() != nil {
+					// Shutting down mid-request is not a failure; the session is closed below.
+					return nil
+				}
 				return err
 			}
 			if msg.Statistics != nil {
