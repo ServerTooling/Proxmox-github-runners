@@ -114,6 +114,25 @@ func LXCExec(id int, command ...string) Cmd {
 	return Cmd{"pct", append([]string{"exec", strconv.Itoa(id), "--"}, command...)}
 }
 
+// ServiceJournalCmd prints this service's log as JSON lines: the last n, or with a cursor (from the
+// previous call) everything after it, capped at n so a long outage cannot produce an unbounded batch.
+func ServiceJournalCmd(cursor string, n int) Cmd {
+	return Cmd{"journalctl", journalArgs("pve-runners.service", cursor, n)}
+}
+
+// RunnerJournalCmd is ServiceJournalCmd for the runner unit inside a guest.
+func RunnerJournalCmd(id int, cursor string, n int) Cmd {
+	return LXCExec(id, append([]string{"journalctl"}, journalArgs("gh-runner.service", cursor, n)...)...)
+}
+
+func journalArgs(unit, cursor string, n int) []string {
+	args := []string{"-u", unit, "-o", "json", "--no-pager", "-n", strconv.Itoa(n)}
+	if cursor != "" {
+		args = append(args, "--after-cursor", cursor)
+	}
+	return args
+}
+
 // LXCFeatures enables what Docker-in-LXC needs; nesting also lets systemd inside the guest work fully.
 func LXCFeatures(id int) Cmd {
 	return Cmd{"pct", []string{"set", strconv.Itoa(id), "--features", "nesting=1,keyctl=1"}}
@@ -181,6 +200,9 @@ var ErrNotOwned = errors.New("refusing to touch a guest this tool does not own")
 func (h *Host) run(ctx context.Context, c Cmd) ([]byte, error) {
 	return h.R.Run(ctx, c.Name, c.Args...)
 }
+
+// Output runs a read-only command and returns what it printed.
+func (h *Host) Output(ctx context.Context, c Cmd) ([]byte, error) { return h.run(ctx, c) }
 
 func (h *Host) Exec(ctx context.Context, c Cmd) error {
 	_, err := h.run(ctx, c)

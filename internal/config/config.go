@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -43,6 +44,7 @@ type Config struct {
 	Images  Images           `yaml:"images"`
 	Network Network          `yaml:"network"`
 	Notify  Notify           `yaml:"notify"`
+	Logs    Logs             `yaml:"logs"`
 	// Autoscale listens to GitHub's job queue and starts a runner for each queued job.
 	Autoscale Autoscale      `yaml:"autoscale"`
 	Extra     map[string]any `yaml:",inline"`
@@ -150,6 +152,20 @@ type Notify struct {
 	Format         string `yaml:"format,omitempty"` // auto | ntfy | discord | slack
 }
 
+// Logs ships this service's log and each running runner's gh-runner log to Grafana Loki (Grafana Cloud
+// or self-hosted), so both can be read without access to the host. Off until url and token_file are set.
+type Logs struct {
+	// URL is the Loki base URL, such as https://logs-prod-012.grafana.net.
+	URL string `yaml:"url,omitempty"`
+	// User is the basic-auth user (Grafana Cloud's numeric Loki user); empty sends the token as a bearer.
+	User string `yaml:"user,omitempty"`
+	// TokenFile holds the token (for Grafana Cloud, an access policy token with logs:write), mode 0600.
+	TokenFile string        `yaml:"token_file,omitempty"`
+	Interval  time.Duration `yaml:"interval"`
+}
+
+func (l Logs) On() bool { return l.URL != "" && l.TokenFile != "" }
+
 // Images controls template images downloaded from GitHub releases (see templates/ in this repo).
 // Runner containers are destroyed as soon as their job ends; images are kept and only aged out by
 // RetentionDays. The newest image of each name, pinned images, and images that runners were cloned
@@ -196,6 +212,7 @@ func Default() *Config {
 			Allow: []pve.AllowRule{{Proto: "udp", Port: 53}, {Proto: "tcp", Port: 53}, {Proto: "udp", Port: 67}},
 		},
 		Autoscale: Autoscale{Enabled: true},
+		Logs:      Logs{Interval: 15 * time.Second},
 		Update: Update{
 			Enabled: true, Channel: "edge", Interval: 15 * time.Minute,
 			Repo: "ServerTooling/proxmox-github-runners",
@@ -286,6 +303,9 @@ func (c *Config) applyDefaults() {
 	}
 	if c.Images.CheckInterval == 0 {
 		c.Images.CheckInterval = d.Images.CheckInterval
+	}
+	if c.Logs.Interval == 0 {
+		c.Logs.Interval = d.Logs.Interval
 	}
 	for i := range c.Targets {
 		if c.Targets[i].PrivateKeyFile == "" && c.Targets[i].Owner() != "" {
@@ -449,6 +469,17 @@ func (c *Config) Validate() error {
 	case "", "auto", "ntfy", "discord", "slack":
 	default:
 		add("notify.format must be auto, ntfy, discord or slack")
+	}
+	if c.Logs.URL != "" {
+		if u, err := url.Parse(c.Logs.URL); err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Host == "" {
+			add("logs.url %q must be an http(s) URL", c.Logs.URL)
+		}
+		if c.Logs.TokenFile == "" {
+			add("logs.url is set but logs.token_file is not")
+		}
+	}
+	if c.Logs.Interval < 5*time.Second {
+		add("logs.interval must be at least 5s, got %s", c.Logs.Interval)
 	}
 	if c.Images.RetentionDays < 1 {
 		add("images.retention_days must be at least 1, got %d", c.Images.RetentionDays)

@@ -38,6 +38,8 @@ SKIP_ROLES=go,helm templates/build.sh ubuntu-latest /tmp/out    # local image bu
 - `templates/`: image definitions (`<name>/template.yaml`) and Ansible roles; `templates/build.sh`
   builds one in Docker and `.github/workflows/templates.yml` publishes it. Every tarball a role
   downloads is checksum-verified against its publisher's sums.
+- `internal/logship`: optional log shipping to Grafana Loki (the service journal plus `gh-runner` in each
+  running runner), read with journal cursors; anything token-like is masked before it leaves the host.
 - `internal/update`: self-update (ed25519-signed SHA256SUMS, atomic swap, health-checked rollback).
 - `internal/config`: YAML with validation and forward migration (`version`).
 

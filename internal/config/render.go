@@ -209,6 +209,27 @@ notify:
   # auto, ntfy, discord or slack.
   format: {{q (or .Notify.Format "auto")}}
 
+logs:
+  # Ship this service's log and each runner's gh-runner log to Grafana Loki (Grafana Cloud or
+  # self-hosted), to read them away from the host. Off until url and token_file are set; the token
+  # (Grafana Cloud: an access policy token with logs:write) goes in its own 0600 file.
+{{- if .Logs.URL}}
+  url: {{q .Logs.URL}}
+{{- else}}
+  # url: https://logs-prod-000.grafana.net
+{{- end}}
+{{- if .Logs.User}}
+  user: {{q .Logs.User}}
+{{- else}}
+  # user: "123456"
+{{- end}}
+{{- if .Logs.TokenFile}}
+  token_file: {{q .Logs.TokenFile}}
+{{- else}}
+  # token_file: /etc/pve-runners/loki-token
+{{- end}}
+  interval: {{dur .Logs.Interval}}
+
 update:
   # Keep this binary updated from the repo's signed releases.
   enabled: {{.Update.Enabled}}

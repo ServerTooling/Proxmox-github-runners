@@ -26,6 +26,7 @@ import (
 	"github.com/ServerTooling/proxmox-github-runners/internal/config"
 	"github.com/ServerTooling/proxmox-github-runners/internal/github"
 	"github.com/ServerTooling/proxmox-github-runners/internal/images"
+	"github.com/ServerTooling/proxmox-github-runners/internal/logship"
 	"github.com/ServerTooling/proxmox-github-runners/internal/notify"
 	"github.com/ServerTooling/proxmox-github-runners/internal/provision"
 	"github.com/ServerTooling/proxmox-github-runners/internal/pve"
@@ -53,6 +54,7 @@ Usage:
   pve-runners status                          show runners on this host
   pve-runners template prepare --ctid ID      install the runner into a container and make it a template
   pve-runners images list|pull|prune          runner images: show templates, fetch pools' images now, age out old ones
+  pve-runners logs ship                       send new log lines to Loki now (see logs: in the config)
   pve-runners config init|validate|show       write the default config (never over a non-empty one),
                                               check it, or print it (secrets are never in it)
   pve-runners update [--now]                  check for (and install) a newer release
@@ -140,6 +142,29 @@ func run(args []string) error {
 			return err
 		}
 		return cmdImages(ctx, *cfgPath, rest[0])
+	case "logs":
+		if len(rest) == 0 || rest[0] != "ship" {
+			return errors.New("usage: pve-runners logs ship")
+		}
+		if err := fs.Parse(rest[1:]); err != nil {
+			return err
+		}
+		cfg, err := config.Load(*cfgPath)
+		if err != nil {
+			return err
+		}
+		sh, err := logShipper(cfg)
+		if err != nil {
+			return err
+		}
+		if sh == nil {
+			return errors.New("logs.url and logs.token_file are not set in the config")
+		}
+		if err := sh.Once(ctx); err != nil {
+			return err
+		}
+		fmt.Println("logs shipped to", cfg.Logs.URL)
+		return nil
 	case "config":
 		if len(rest) == 0 {
 			return errors.New("usage: pve-runners config init|validate|show")
@@ -226,6 +251,19 @@ func updater(cfg *config.Config) *update.Updater {
 			}
 			return nil
 		}}
+}
+
+// logShipper returns nil when log shipping is not configured.
+func logShipper(cfg *config.Config) (*logship.Shipper, error) {
+	if !cfg.Logs.On() {
+		return nil, nil
+	}
+	b, err := os.ReadFile(cfg.Logs.TokenFile)
+	if err != nil {
+		return nil, fmt.Errorf("read logs token file: %w", err)
+	}
+	return &logship.Shipper{Host: host(cfg), URL: cfg.Logs.URL, User: cfg.Logs.User, Token: strings.TrimSpace(string(b)),
+		HostID: cfg.HostID, HTTP: &http.Client{Timeout: 30 * time.Second}, Now: time.Now}, nil
 }
 
 // appClient builds the App client for a target from its own key file.
@@ -635,6 +673,8 @@ func cmdRun(ctx context.Context, cfgPath string) error {
 	reload := make(chan os.Signal, 1)
 	signal.Notify(reload, syscall.SIGHUP)
 	reconcileTick := time.NewTicker(30 * time.Second)
+	logsTick := time.NewTicker(cfg.Logs.Interval)
+	defer logsTick.Stop()
 	updateTick := time.NewTicker(cfg.Update.Interval)
 	imageTick := time.NewTicker(cfg.Images.CheckInterval)
 	defer reconcileTick.Stop()
@@ -662,6 +702,41 @@ func cmdRun(ctx context.Context, cfgPath string) error {
 	}
 	syncImagesAsync(cfg)
 
+	// Shipping runs beside the loop so a slow log endpoint never delays reconcile. Repeated failures
+	// are logged once per distinct error: each logged line would itself be shipped next round.
+	var shipper *logship.Shipper
+	var logsBusy atomic.Bool
+	var lastShipErr string
+	setShipper := func(cfg *config.Config) {
+		var err error
+		if shipper, err = logShipper(cfg); err != nil {
+			slog.Error("log shipping disabled", "err", err)
+		}
+		logsTick.Reset(cfg.Logs.Interval)
+	}
+	shipLogs := func() {
+		sh := shipper
+		if sh == nil || !logsBusy.CompareAndSwap(false, true) {
+			return
+		}
+		go func() {
+			defer logsBusy.Store(false)
+			msg := ""
+			if err := sh.Once(ctx); err != nil && ctx.Err() == nil {
+				msg = err.Error()
+			}
+			if msg != lastShipErr {
+				if msg != "" {
+					slog.Error("log shipping", "err", msg)
+				} else {
+					slog.Info("log shipping recovered")
+				}
+				lastShipErr = msg
+			}
+		}()
+	}
+	setShipper(cfg)
+
 	// Listeners that failed to start (say, a missing key file) are retried on the reconcile tick.
 	var scaler *autoscaler
 	startScaler := func() {
@@ -687,12 +762,15 @@ func cmdRun(ctx context.Context, cfgPath string) error {
 			}
 			cfg = c
 			slog.Info("config reloaded")
+			setShipper(cfg)
 			syncImagesAsync(cfg)
 			scaler.stop()
 			scaler = nil
 			startScaler()
 		case <-imageTick.C:
 			syncImagesAsync(cfg)
+		case <-logsTick.C:
+			shipLogs()
 		case <-reconcileTick.C:
 			startScaler()
 			done, err := reconcile.Once(ctx, cfg, host(cfg), time.Now())
