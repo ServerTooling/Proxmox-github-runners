@@ -158,6 +158,10 @@ pools:{{if not .Pools}} {}{{end}}
     # Use another bridge than proxmox.bridge for this pool:
     # bridge: vmbr1
 {{- end}}
+{{- if .ScaleSet}}
+    # GitHub scale set name (what runs-on matches); defaults to the first label.
+    scale_set: {{q .ScaleSet}}
+{{- end}}
 {{- if .VLAN}}
     vlan: {{.VLAN}}
 {{- else}}
@@ -165,6 +169,11 @@ pools:{{if not .Pools}} {}{{end}}
     # vlan: 50
 {{- end}}
 {{- end}}{{end}}
+
+autoscale:
+  # Listen to GitHub's job queue and start a runner for each queued job (outbound HTTPS only).
+  # Off: runners start only with "pve-runners spawn".
+  enabled: {{.Autoscale.Enabled}}
 
 images:
   # Delete downloaded images and their templates after this many days. The newest image of each

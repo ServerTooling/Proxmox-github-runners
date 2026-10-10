@@ -124,3 +124,20 @@ func TestConvertManifestIsSingleUse(t *testing.T) {
 		t.Fatal("second conversion should fail")
 	}
 }
+
+func TestRegistrationTokenPaths(t *testing.T) {
+	f := githubtest.New(42)
+	defer f.Close()
+	c := github.NewClient(f.URL, 42, f.Key)
+	org, err := c.RegistrationToken(context.Background(), 5, "example-org", "")
+	if err != nil || org != "regtok-5" {
+		t.Fatalf("org: %q %v", org, err)
+	}
+	if _, err := c.RegistrationToken(context.Background(), 6, "someone", "side"); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"/orgs/example-org/actions/runners/registration-token", "/repos/someone/side/actions/runners/registration-token"}
+	if !reflect.DeepEqual(f.RegTokens, want) {
+		t.Fatalf("paths %v", f.RegTokens)
+	}
+}

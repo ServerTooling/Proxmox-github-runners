@@ -217,3 +217,59 @@ func TestPrepareTemplate(t *testing.T) {
 		t.Fatalf("got %q", m)
 	}
 }
+
+func TestSpawnWithJITCallbackSkipsTheApp(t *testing.T) {
+	p, f, gh := setup(t)
+	p.Cfg.Network.Isolate = new(bool)
+	var asked string
+	req := Request{Pool: "small", Target: org, Tags: []string{"scaleset-3"},
+		JIT: func(_ context.Context, name string) (*github.JITConfig, error) {
+			asked = name
+			return &github.JITConfig{EncodedJITConfig: "from-scale-set"}, nil
+		}}
+	if _, err := p.Spawn(context.Background(), req); err != nil {
+		t.Fatal(err)
+	}
+	if asked != "gh-pve1-small-9000" {
+		t.Errorf("JIT asked for %q", asked)
+	}
+	if len(gh.JITRequests) != 0 {
+		t.Errorf("the App's JIT endpoint was used: %+v", gh.JITRequests)
+	}
+	if got := f.Pushed["9000:/etc/gh-runner/jitconfig"]; got != "from-scale-set" {
+		t.Errorf("pushed %q", got)
+	}
+	if !strings.Contains(f.Mutations()[1], "--tags gh-runner;pool-small;owner-example-org;mode-ephemeral;from-8000;created-1700000000;scaleset-3 ") {
+		t.Errorf("set: %q", f.Mutations()[1])
+	}
+}
+
+func TestConcurrentSpawnsRespectCapacity(t *testing.T) {
+	p, f, _ := setup(t)
+	p.Cfg.Network.Isolate = new(bool)
+	f.Delay = time.Millisecond
+	jit := func(context.Context, string) (*github.JITConfig, error) {
+		return &github.JITConfig{EncodedJITConfig: "x"}, nil
+	}
+	errs := make(chan error, 4)
+	for range 4 {
+		go func() {
+			_, err := p.Spawn(context.Background(), Request{Pool: "small", Target: org, JIT: jit})
+			errs <- err
+		}()
+	}
+	ok, full := 0, 0
+	for range 4 {
+		switch err := <-errs; {
+		case err == nil:
+			ok++
+		case errors.Is(err, ErrAtCapacity):
+			full++
+		default:
+			t.Fatal(err)
+		}
+	}
+	if ok != 2 || full != 2 {
+		t.Fatalf("%d started, %d refused; pool max is 2", ok, full)
+	}
+}

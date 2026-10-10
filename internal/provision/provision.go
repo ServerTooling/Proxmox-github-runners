@@ -10,6 +10,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -42,6 +43,10 @@ type Provisioner struct {
 	Templates func(ctx context.Context, image string) (int, error)
 	Now       func() time.Time
 	TmpDir    string
+
+	// mu serializes spawns so concurrent callers (one autoscale listener per scale set) can't both
+	// pass the capacity checks for the last free slot or pick the same free guest ID.
+	mu sync.Mutex
 }
 
 // Proxmox tags allow only [a-z0-9_+.-], so owner names are lowercased and anything else dropped.
@@ -58,14 +63,22 @@ func tagSafe(s string) string {
 // Tags returns the tags a runner guest carries; reconcile and status read state back from them, and
 // image pruning reads from-<template> to keep templates that runners were cloned from.
 func Tags(pool, owner, mode string, template int, created time.Time) []string {
-	return []string{pve.Tag, "pool-" + tagSafe(pool), "owner-" + tagSafe(owner), "mode-" + mode,
+	return []string{pve.Tag, "pool-" + tagSafe(pool), OwnerTag(owner), "mode-" + mode,
 		"from-" + strconv.Itoa(template), "created-" + strconv.FormatInt(created.Unix(), 10)}
 }
+
+// OwnerTag is the tag naming the org or account a runner serves.
+func OwnerTag(owner string) string { return "owner-" + tagSafe(owner) }
 
 type Request struct {
 	Pool   string
 	Target config.Target
 	Repo   string // required for personal-account targets
+	// JIT, when set, makes the runner's single-use config instead of the target's App (the
+	// autoscaler registers runners inside its scale set this way).
+	JIT func(ctx context.Context, name string) (*github.JITConfig, error)
+	// Tags are added to the guest's own tags.
+	Tags []string
 }
 
 type Result struct {
@@ -93,6 +106,8 @@ func (p *Provisioner) now() time.Time {
 func (p *Provisioner) Spawn(ctx context.Context, req Request) (res *Result, err error) {
 	inFlight.Add(1)
 	defer inFlight.Add(-1)
+	p.mu.Lock()
+	defer p.mu.Unlock()
 
 	pool, ok := p.Cfg.Pools[req.Pool]
 	if !ok {
@@ -163,21 +178,8 @@ func (p *Provisioner) Spawn(ctx context.Context, req Request) (res *Result, err 
 		name = fmt.Sprintf("gh-%s-%d", tagSafe(req.Pool), id)
 	}
 
-	jreq := github.JITRequest{Name: name, Labels: append([]string{"self-hosted", "linux"}, pool.Labels...), WorkFolder: "_work"}
-	var jit *github.JITConfig
 	t := req.Target
-	gh, err := p.GitHub(t)
-	if err != nil {
-		return nil, err
-	}
-	if t.Org != "" {
-		if jreq.RunnerGroupID, err = gh.RunnerGroupID(ctx, t.InstallationID, t.Org, t.RunnerGroup); err != nil {
-			return nil, err
-		}
-		jit, err = gh.OrgJITConfig(ctx, t.InstallationID, t.Org, jreq)
-	} else {
-		jit, err = gh.RepoJITConfig(ctx, t.InstallationID, t.User, req.Repo, jreq)
-	}
+	jit, err := p.jit(ctx, req, name, pool.Labels)
 	if err != nil {
 		return nil, fmt.Errorf("create JIT runner config: %w", err)
 	}
@@ -195,7 +197,8 @@ func (p *Provisioner) Spawn(ctx context.Context, req Request) (res *Result, err 
 			}
 		}
 	}()
-	spec := pve.LXCSpec{Cores: pool.Cores, MemoryMB: pool.MemoryMB, Tags: Tags(req.Pool, t.Owner(), pool.Mode, template, p.now()),
+	tags := append(Tags(req.Pool, t.Owner(), pool.Mode, template, p.now()), req.Tags...)
+	spec := pve.LXCSpec{Cores: pool.Cores, MemoryMB: pool.MemoryMB, Tags: tags,
 		Bridge: pool.Bridge, VLAN: pool.VLAN, Description: "GitHub Actions runner managed by pve-runners"}
 	if err = p.Host.Exec(ctx, pve.LXCSet(id, spec)); err != nil {
 		return nil, err
@@ -222,6 +225,25 @@ func (p *Provisioner) Spawn(ctx context.Context, req Request) (res *Result, err 
 		return nil, err
 	}
 	return &Result{VMID: id, Name: name, RunnerID: jit.Runner.ID, RunnerName: jit.Runner.Name}, nil
+}
+
+func (p *Provisioner) jit(ctx context.Context, req Request, name string, labels []string) (*github.JITConfig, error) {
+	if req.JIT != nil {
+		return req.JIT(ctx, name)
+	}
+	jreq := github.JITRequest{Name: name, Labels: append([]string{"self-hosted", "linux"}, labels...), WorkFolder: "_work"}
+	t := req.Target
+	gh, err := p.GitHub(t)
+	if err != nil {
+		return nil, err
+	}
+	if t.Org == "" {
+		return gh.RepoJITConfig(ctx, t.InstallationID, t.User, req.Repo, jreq)
+	}
+	if jreq.RunnerGroupID, err = gh.RunnerGroupID(ctx, t.InstallationID, t.Org, t.RunnerGroup); err != nil {
+		return nil, err
+	}
+	return gh.OrgJITConfig(ctx, t.InstallationID, t.Org, jreq)
 }
 
 // pushSecret writes a secret to a 0600 temp file, pushes it into the guest, and removes the temp

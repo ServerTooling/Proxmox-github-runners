@@ -29,6 +29,8 @@ type Fake struct {
 	Repos         map[int64][]map[string]any
 	RunnerGroups  map[string][]map[string]any
 	JITRequests   []Recorded
+	// RegTokens records registration-token requests by path; each returns "regtok-<installation>".
+	RegTokens     []string
 	ManifestCodes map[string]bool
 	// RepoVisibility maps "owner/repo" to public | private | internal.
 	RepoVisibility map[string]string
@@ -154,6 +156,11 @@ func (f *Fake) serve(w http.ResponseWriter, r *http.Request) {
 	case r.Method == "GET" && strings.HasSuffix(path, "/actions/runner-groups"):
 		org := strings.Split(path, "/")[2]
 		write(w, 200, map[string]any{"runner_groups": f.RunnerGroups[org]})
+	case r.Method == "POST" && strings.HasSuffix(path, "/actions/runners/registration-token"):
+		f.mu.Lock()
+		f.RegTokens = append(f.RegTokens, path)
+		f.mu.Unlock()
+		write(w, 201, map[string]any{"token": fmt.Sprintf("regtok-%d", inst), "expires_at": "2099-01-01T00:00:00Z"})
 	case r.Method == "POST" && strings.HasSuffix(path, "/actions/runners/generate-jitconfig"):
 		body, _ := io.ReadAll(r.Body)
 		var m map[string]any
