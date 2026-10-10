@@ -1,0 +1,37 @@
+# Runner image that tracks GitHub's `ubuntu-latest` (Ubuntu 24.04 today). Bump `base` in a PR when
+# GitHub moves ubuntu-latest to a new release.
+name: ubuntu-latest
+base: ubuntu:24.04
+
+# Ansible roles from templates/roles, applied in order.
+roles:
+  - base              # systemd and networking: what an LXC guest needs to boot
+  - common            # git, curl, jq, build tools, gh CLI
+  - python
+  - go
+  - node
+  - helm
+  - kubectl
+  - docker
+  - actions_runner    # pinned by packaging/runner-version; the one-job runner service
+
+# Tool versions: "latest"/"lts"/"stable" resolve at build time (recorded in the release's
+# template.json), or give an exact version to pin. Role defaults apply to anything left out.
+vars:
+  go_version: latest
+  node_version: lts
+  helm_version: latest
+  kubectl_version: stable
+
+# Every command must succeed in the built image before it is published, keyed by the role that
+# provides it (local builds that skip a role skip its checks). The first output line of each is
+# recorded in the release's template.json.
+smoke:
+  common: [git --version, gh --version, jq --version]
+  python: [python3 --version, pip3 --version, pipx --version]
+  go: [go version]
+  node: [node --version, npm --version]
+  helm: [helm version --short]
+  kubectl: [kubectl version --client]
+  docker: [docker --version]
+  actions_runner: [/opt/actions-runner/bin/Runner.Listener --version, systemctl is-enabled gh-runner.service]

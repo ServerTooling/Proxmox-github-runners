@@ -1,0 +1,18 @@
+# Same install as `pve-runners template prepare`: the shared script installs the runner and the
+# gh-runner.service that runs exactly one JIT job and then powers the guest off.
+- name: Download the pinned actions/runner
+  ansible.builtin.get_url:
+    url: "https://github.com/actions/runner/releases/download/v{{ runner_version }}/actions-runner-linux-{{ 'x64' if arch == 'amd64' else 'arm64' }}-{{ runner_version }}.tar.gz"
+    checksum: "sha256:{{ runner_sha256 }}"
+    dest: /tmp/actions-runner.tar.gz
+    mode: "0644"
+
+- name: Install runner and its one-job service
+  ansible.builtin.script: "{{ playbook_dir }}/../internal/provision/template-setup.sh"
+
+- name: Let the runner use Docker
+  ansible.builtin.user:
+    name: runner
+    groups: docker
+    append: true
+  when: "'docker' in tpl.roles"

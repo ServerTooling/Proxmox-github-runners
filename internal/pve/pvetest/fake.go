@@ -23,7 +23,11 @@ type Fake struct {
 	ReadSrc func(path string) (string, error)
 	// FirewallOn is the datacenter firewall switch; Group is the egress group's rules (nil = no group).
 	FirewallOn bool
-	Group      []map[string]any
+	// PolicyIn is the datacenter input policy ("" reports nothing, like an unset default of DROP).
+	PolicyIn string
+	Group    []map[string]any
+	// NodeRules are the host firewall rules (pos, comment, dport).
+	NodeRules []map[string]any
 }
 
 func New(guests ...pve.Guest) *Fake {
@@ -45,6 +49,9 @@ func (f *Fake) Run(_ context.Context, name string, args ...string) ([]byte, erro
 		on := 0
 		if f.FirewallOn {
 			on = 1
+		}
+		if f.PolicyIn != "" {
+			return []byte(fmt.Sprintf(`{"enable":%d,"policy_in":%q}`, on, f.PolicyIn)), nil
 		}
 		return []byte(fmt.Sprintf(`{"enable":%d}`, on)), nil
 	case name == "pvesh" && args[0] == "get" && strings.HasPrefix(args[1], "/cluster/firewall/groups/"):
@@ -78,12 +85,50 @@ func (f *Fake) Run(_ context.Context, name string, args ...string) ([]byte, erro
 		r["pos"] = float64(pos)
 		f.Group = append(f.Group, r)
 		return nil, nil
+	case name == "pvesh" && strings.HasPrefix(args[1], "/nodes/") && strings.HasSuffix(args[1], "/firewall/rules") &&
+		!strings.Contains(args[1], "/lxc/"):
+		switch args[0] {
+		case "get":
+			if f.NodeRules == nil {
+				return []byte("[]"), nil
+			}
+			return json.Marshal(f.NodeRules)
+		case "create":
+			r := map[string]any{"pos": float64(0)}
+			for i := 2; i+1 < len(args); i += 2 {
+				r[strings.TrimPrefix(args[i], "--")] = args[i+1]
+			}
+			// New rules go to the top, like Proxmox does.
+			for _, o := range f.NodeRules {
+				o["pos"] = o["pos"].(float64) + 1
+			}
+			f.NodeRules = append([]map[string]any{r}, f.NodeRules...)
+		}
+		return nil, nil
+	case name == "pvesh" && args[0] == "delete" && strings.HasPrefix(args[1], "/nodes/") &&
+		strings.Contains(args[1], "/firewall/rules/") && !strings.Contains(args[1], "/lxc/"):
+		parts := strings.Split(args[1], "/")
+		pos, _ := strconv.Atoi(parts[len(parts)-1])
+		var kept []map[string]any
+		for _, r := range f.NodeRules {
+			if p := int(r["pos"].(float64)); p != pos {
+				if p > pos {
+					r["pos"] = float64(p - 1)
+				}
+				kept = append(kept, r)
+			}
+		}
+		f.NodeRules = kept
+		return nil, nil
 	case name == "pvesh" && strings.HasPrefix(args[1], "/nodes/") && strings.Contains(args[1], "/firewall/"):
 		return nil, nil
 	case name == "pvesh" && args[1] == "/cluster/resources":
 		return json.Marshal(f.Guests)
 	case name == "pvesh" && strings.HasSuffix(args[1], "/status"):
 		return []byte(fmt.Sprintf(`{"memory":{"free":%d,"total":%d,"used":0}}`, int64(f.FreeMB)<<20, int64(f.FreeMB)<<20)), nil
+	case name == "pvesm" && args[0] == "path":
+		_, file, _ := strings.Cut(args[1], ":vztmpl/")
+		return []byte("/var/lib/vz/template/cache/" + file + "\n"), nil
 	case name == "pct":
 		return nil, f.pct(args)
 	}
@@ -147,7 +192,21 @@ func (f *Fake) pct(args []string) error {
 			content = c
 		}
 		f.Pushed[args[1]+":"+args[3]] = content
-	case "exec", "template", "resize":
+	case "create":
+		id, _ := strconv.Atoi(args[1])
+		g := pve.Guest{VMID: id, Type: "lxc", Status: "stopped", Node: "pve1"}
+		for i := 3; i+1 < len(args); i += 2 {
+			switch args[i] {
+			case "--hostname":
+				g.Name = args[i+1]
+			case "--tags":
+				g.RawTags = args[i+1]
+			}
+		}
+		f.Guests = append(f.Guests, g)
+	case "template":
+		f.find(args[1]).Template = 1
+	case "exec", "resize":
 	default:
 		return fmt.Errorf("fake: unexpected pct %s", args[0])
 	}

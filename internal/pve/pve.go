@@ -212,7 +212,10 @@ func (h *Host) Runners(ctx context.Context) ([]Guest, error) {
 }
 
 // NextFreeID picks the lowest unused ID in the reserved range, looking at every guest in the cluster.
-func (h *Host) NextFreeID(ctx context.Context) (int, error) {
+func (h *Host) NextFreeID(ctx context.Context) (int, error) { return h.NextFreeIDIn(ctx, h.VMIDRange) }
+
+// NextFreeIDIn picks the lowest ID in rng that no guest in the cluster uses.
+func (h *Host) NextFreeIDIn(ctx context.Context, rng [2]int) (int, error) {
 	gs, err := h.Guests(ctx)
 	if err != nil {
 		return 0, err
@@ -221,12 +224,12 @@ func (h *Host) NextFreeID(ctx context.Context) (int, error) {
 	for _, g := range gs {
 		used[g.VMID] = true
 	}
-	for id := h.VMIDRange[0]; id <= h.VMIDRange[1]; id++ {
+	for id := rng[0]; id <= rng[1]; id++ {
 		if !used[id] {
 			return id, nil
 		}
 	}
-	return 0, fmt.Errorf("no free guest ID left in %d-%d", h.VMIDRange[0], h.VMIDRange[1])
+	return 0, fmt.Errorf("no free guest ID left in %d-%d", rng[0], rng[1])
 }
 
 // Destroy stops (if needed) and destroys an owned LXC. It re-reads the guest first so a stale list
@@ -274,4 +277,89 @@ func (h *Host) FreeMemoryMB(ctx context.Context) (int, error) {
 		free = st.Memory.Total - st.Memory.Used
 	}
 	return int(free / (1 << 20)), nil
+}
+
+// TemplateTag marks template containers this tool created from downloaded images. They live in their
+// own ID range (images.vmid_range), apart from runners, so reconcile never sees them.
+const TemplateTag = "gh-template"
+
+// CreateSpec describes a template container made from a downloaded image archive.
+type CreateSpec struct {
+	Archive     string // volume ID, e.g. local:vztmpl/file.tar.zst
+	Hostname    string
+	Pool        string
+	Storage     string
+	RootfsGB    int
+	Bridge      string
+	Tags        []string
+	Description string
+}
+
+// LXCCreate builds `pct create` for a runner template. Unprivileged with nesting and keyctl is what
+// Docker inside the runner needs; net0 has the Proxmox firewall on so clones inherit isolation.
+func LXCCreate(id int, s CreateSpec) Cmd {
+	return Cmd{"pct", []string{"create", strconv.Itoa(id), s.Archive,
+		"--hostname", s.Hostname,
+		"--pool", s.Pool,
+		"--rootfs", s.Storage + ":" + strconv.Itoa(s.RootfsGB),
+		"--unprivileged", "1",
+		"--features", "nesting=1,keyctl=1",
+		"--cores", "2",
+		"--memory", "2048",
+		"--net0", "name=eth0,bridge=" + s.Bridge + ",ip=dhcp,firewall=1",
+		"--onboot", "0",
+		"--tags", strings.Join(s.Tags, ";"),
+		"--description", s.Description,
+	}}
+}
+
+// OwnedTemplate is the guard for destroying image templates: inside the template range AND tagged.
+func OwnedTemplate(g Guest, rng [2]int) bool {
+	return g.Type == "lxc" && g.VMID >= rng[0] && g.VMID <= rng[1] && g.HasTag(TemplateTag)
+}
+
+// Templates returns the image templates this tool owns in rng.
+func (h *Host) Templates(ctx context.Context, rng [2]int) ([]Guest, error) {
+	gs, err := h.Guests(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var out []Guest
+	for _, g := range gs {
+		if OwnedTemplate(g, rng) {
+			out = append(out, g)
+		}
+	}
+	return out, nil
+}
+
+// DestroyTemplate removes an owned image template, re-reading the guest list first like Destroy.
+// Proxmox itself refuses while linked clones of it still exist.
+func (h *Host) DestroyTemplate(ctx context.Context, id int, rng [2]int) error {
+	gs, err := h.Guests(ctx)
+	if err != nil {
+		return err
+	}
+	for _, g := range gs {
+		if g.VMID != id {
+			continue
+		}
+		if !OwnedTemplate(g, rng) {
+			return fmt.Errorf("%w: %d (%s)", ErrNotOwned, id, g.Name)
+		}
+		return h.Exec(ctx, LXCDestroy(id))
+	}
+	return nil
+}
+
+// VolumePathCmd asks Proxmox where a volume lives on disk; it works for volumes that don't exist yet,
+// which is how the image cache finds a storage's vztmpl directory.
+func VolumePathCmd(volid string) Cmd { return Cmd{"pvesm", []string{"path", volid}} }
+
+func (h *Host) VolumePath(ctx context.Context, volid string) (string, error) {
+	out, err := h.run(ctx, VolumePathCmd(volid))
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(out)), nil
 }

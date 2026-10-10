@@ -1,0 +1,20 @@
+# Applies a template definition's roles to the build container (see build.sh).
+- name: Build runner image
+  hosts: all
+  gather_facts: true
+  environment:
+    DEBIAN_FRONTEND: noninteractive
+  vars:
+    arch: "{{ 'amd64' if ansible_architecture == 'x86_64' else 'arm64' }}"
+  pre_tasks:
+    # Loaded under `tpl` because `roles` and `name` are Ansible keywords. Its `vars` map is passed
+    # separately as extra vars by build.sh so roles see the versions directly.
+    - name: Load template definition
+      ansible.builtin.include_vars:
+        file: "{{ template_file }}"
+        name: tpl
+  tasks:
+    - name: Apply roles
+      ansible.builtin.include_role:
+        name: "{{ item }}"
+      loop: "{{ tpl.roles | reject('in', skip_roles | default([])) | list }}"

@@ -1,0 +1,35 @@
+- name: Resolve latest Go
+  ansible.builtin.uri:
+    url: https://go.dev/VERSION?m=text
+    return_content: true
+  register: go_latest
+  when: go_version == 'latest'
+
+- name: Go version
+  ansible.builtin.set_fact:
+    go_resolved: "{{ (go_latest.content.splitlines()[0] | regex_replace('^go', '')) if go_version == 'latest' else go_version }}"
+
+- name: Download Go
+  ansible.builtin.get_url:
+    url: "https://dl.google.com/go/go{{ go_resolved }}.linux-{{ arch }}.tar.gz"
+    checksum: "sha256:https://dl.google.com/go/go{{ go_resolved }}.linux-{{ arch }}.tar.gz.sha256"
+    dest: /tmp/go.tar.gz
+    mode: "0644"
+
+- name: Install Go to /usr/local/go
+  ansible.builtin.unarchive:
+    src: /tmp/go.tar.gz
+    dest: /usr/local
+    remote_src: true
+
+- name: Put go and gofmt on PATH (the runner service doesn't read profile.d)
+  ansible.builtin.file:
+    src: "/usr/local/go/bin/{{ item }}"
+    dest: "/usr/local/bin/{{ item }}"
+    state: link
+  loop: [go, gofmt]
+
+- name: Remove download
+  ansible.builtin.file:
+    path: /tmp/go.tar.gz
+    state: absent

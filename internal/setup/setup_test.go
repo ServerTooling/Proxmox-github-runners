@@ -68,6 +68,11 @@ func TestFullSetupFlowForAnOrg(t *testing.T) {
 		t.Fatalf("index: %d", resp.StatusCode)
 	}
 	c.PostForm(srv.URL+"/host", url.Values{"node": {"pve1"}, "template": {"8000"}, "max_runners": {"4"}})
+	if p := s.Cfg.Pools["default"]; p.Template != 8000 || p.Image != "" {
+		t.Fatalf("hand-made template: %+v", p)
+	}
+	// Leaving the template empty switches the pool to the published image.
+	c.PostForm(srv.URL+"/host", url.Values{"node": {"pve1"}, "template": {""}, "max_runners": {"4"}, "bridge": {"vmbr4"}})
 
 	resp, _ := c.PostForm(srv.URL+"/app/new", url.Values{"org": {"example-org"}})
 	body, _ := io.ReadAll(resp.Body)
@@ -108,7 +113,8 @@ func TestFullSetupFlowForAnOrg(t *testing.T) {
 		t.Fatal(err)
 	}
 	tg := got.Targets[0]
-	if tg.Org != "example-org" || tg.AppID != 42 || tg.InstallationID != 77 || got.Pools["default"].Template != 8000 ||
+	if tg.Org != "example-org" || tg.AppID != 42 || tg.InstallationID != 77 || got.Pools["default"].Template != 0 ||
+		got.Pools["default"].Image != "ubuntu-latest" || got.Proxmox.Bridge != "vmbr4" || got.Pools["default"].Bridge != "vmbr4" ||
 		got.Pools["default"].Labels[0] != "proxmox" || got.Proxmox.Node != "pve1" {
 		t.Fatalf("config: %+v %+v", tg, got.Pools["default"])
 	}
@@ -134,5 +140,13 @@ func TestPersonalAccountKeepsOnlyPrivateRepos(t *testing.T) {
 	tg := s.Cfg.Targets[0]
 	if tg.User != "example-org" || len(tg.Repos) != 1 || tg.Repos[0] != "secret" {
 		t.Fatalf("target %+v", tg)
+	}
+}
+
+func TestOrderAddrsPutsWebUIAddressFirst(t *testing.T) {
+	got := OrderAddrs([]string{"198.51.100.1", "192.0.2.10", "203.0.113.5"}, []string{"192.0.2.10", "192.0.2.99", "203.0.113.5"})
+	want := []string{"192.0.2.10", "203.0.113.5", "198.51.100.1"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("got %v", got)
 	}
 }

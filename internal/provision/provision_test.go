@@ -57,7 +57,7 @@ func TestSpawnRunsExactSequence(t *testing.T) {
 	push := m[6]
 	want := []string{
 		"pct clone 8000 9000 --hostname gh-pve1-small-9000 --pool gh-runners",
-		"pct set 9000 --cores 2 --memory 2048 --tags gh-runner;pool-small;owner-example-org;mode-ephemeral;created-1700000000 --onboot 0 --description GitHub Actions runner managed by pve-runners --net0 name=eth0,bridge=vmbr1,ip=dhcp,firewall=1,tag=50",
+		"pct set 9000 --cores 2 --memory 2048 --tags gh-runner;pool-small;owner-example-org;mode-ephemeral;from-8000;created-1700000000 --onboot 0 --description GitHub Actions runner managed by pve-runners --net0 name=eth0,bridge=vmbr1,ip=dhcp,firewall=1,tag=50",
 		"pct resize 9000 rootfs 40G",
 		"pvesh set /nodes/pve1/lxc/9000/firewall/options --enable 1 --policy_in DROP --policy_out ACCEPT --dhcp 1 --ipfilter 1",
 		"pvesh create /nodes/pve1/lxc/9000/firewall/rules --type group --action gh-runner-egress --enable 1",
@@ -174,6 +174,31 @@ func TestSpawnPersonalAccountUsesRepoRunner(t *testing.T) {
 	}
 	if gh.JITRequests[0].Path != "/repos/someone/side/actions/runners/generate-jitconfig" {
 		t.Fatalf("path %s", gh.JITRequests[0].Path)
+	}
+}
+
+func TestSpawnFromImageClonesItsTemplate(t *testing.T) {
+	p, f, gh := setup(t)
+	gh.RunnerGroups["Example-Org"] = gh.RunnerGroups["example-org"]
+	f.Guests = append(f.Guests, pve.Guest{VMID: 8900, Type: "lxc", Template: 1, Node: "pve1"})
+	p.Cfg.Pools["small"].Template, p.Cfg.Pools["small"].Image = 0, "ubuntu-latest"
+	var asked string
+	p.Templates = func(_ context.Context, image string) (int, error) { asked = image; return 8900, nil }
+	if _, err := p.Spawn(context.Background(), Request{Pool: "small", Target: org}); err != nil {
+		t.Fatal(err)
+	}
+	m := strings.Join(f.Mutations(), "\n")
+	if asked != "ubuntu-latest" || !strings.Contains(m, "pct clone 8900 9000 ") || !strings.Contains(m, ";from-8900;") {
+		t.Fatalf("image %q, commands:\n%s", asked, m)
+	}
+
+	p.Templates = func(context.Context, string) (int, error) { return 0, errors.New("no published image") }
+	before := len(f.Mutations())
+	if _, err := p.Spawn(context.Background(), Request{Pool: "small", Target: org}); err == nil || !strings.Contains(err.Error(), "no published image") {
+		t.Fatalf("got %v", err)
+	}
+	if len(f.Mutations()) != before {
+		t.Fatal("nothing may be created when the image is unavailable")
 	}
 }
 

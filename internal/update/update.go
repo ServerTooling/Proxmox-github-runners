@@ -47,7 +47,7 @@ type Release struct {
 	Assets     []Asset   `json:"assets"`
 }
 
-func (r Release) asset(name string) (Asset, bool) {
+func (r Release) Asset(name string) (Asset, bool) {
 	for _, a := range r.Assets {
 		if a.Name == name {
 			return a, true
@@ -149,7 +149,7 @@ func (u *Updater) Latest(ctx context.Context) (*Release, error) {
 		if r.Draft || r.Prerelease || !OnChannel(r.Tag, u.Channel) || slices.Contains(skip, r.Tag) {
 			continue
 		}
-		if _, ok := r.asset(BinaryAsset(u.GOARCH)); !ok {
+		if _, ok := r.Asset(BinaryAsset(u.GOARCH)); !ok {
 			continue
 		}
 		if best == nil || r.Published.After(best.Published) {
@@ -171,7 +171,7 @@ func (u *Updater) Download(ctx context.Context, r *Release) ([]byte, error) {
 	name := BinaryAsset(u.GOARCH)
 	assets := map[string]Asset{}
 	for _, n := range []string{name, SumsAsset, SigAsset} {
-		a, ok := r.asset(n)
+		a, ok := r.Asset(n)
 		if !ok {
 			return nil, fmt.Errorf("release %s has no %s", r.Tag, n)
 		}
@@ -185,17 +185,10 @@ func (u *Updater) Download(ctx context.Context, r *Release) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	sigBytes, err := base64.StdEncoding.DecodeString(strings.TrimSpace(string(sig)))
-	if err != nil || !ed25519.Verify(key, sums, sigBytes) {
-		return nil, fmt.Errorf("release %s: SHA256SUMS signature does not verify; refusing to install", r.Tag)
+	if err := VerifySums(key, sums, sig); err != nil {
+		return nil, fmt.Errorf("release %s: %w; refusing to install", r.Tag, err)
 	}
-	want := ""
-	for _, line := range strings.Split(string(sums), "\n") {
-		f := strings.Fields(line)
-		if len(f) == 2 && strings.TrimPrefix(f[1], "*") == name {
-			want = f[0]
-		}
-	}
+	want := SumFor(sums, name)
 	if want == "" {
 		return nil, fmt.Errorf("release %s: %s not listed in SHA256SUMS", r.Tag, name)
 	}
@@ -208,6 +201,27 @@ func (u *Updater) Download(ctx context.Context, r *Release) ([]byte, error) {
 		return nil, fmt.Errorf("release %s: %s checksum mismatch", r.Tag, name)
 	}
 	return bin, nil
+}
+
+// VerifySums checks the base64 ed25519 signature over a SHA256SUMS file. Tool updates and template
+// images share the key, so a host trusts exactly what this repo's CI signed.
+func VerifySums(key ed25519.PublicKey, sums, sig []byte) error {
+	b, err := base64.StdEncoding.DecodeString(strings.TrimSpace(string(sig)))
+	if err != nil || !ed25519.Verify(key, sums, b) {
+		return errors.New("SHA256SUMS signature does not verify")
+	}
+	return nil
+}
+
+// SumFor returns the hex SHA-256 listed for name in a SHA256SUMS file, or "".
+func SumFor(sums []byte, name string) string {
+	for _, line := range strings.Split(string(sums), "\n") {
+		f := strings.Fields(line)
+		if len(f) == 2 && strings.TrimPrefix(f[1], "*") == name {
+			return f[0]
+		}
+	}
+	return ""
 }
 
 type pending struct {

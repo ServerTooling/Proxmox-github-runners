@@ -15,6 +15,7 @@ go test ./...                      # all tests; no Proxmox or network needed
 go vet ./... && gofmt -l .         # CI fails on either
 scripts/privacy-scan.sh            # CI and release gate: no private IPs, hostnames, emails, secrets
 go test ./internal/provision/ -run TestSpawnRunsExactSequence   # single test
+SKIP_ROLES=go,helm templates/build.sh ubuntu-latest /tmp/out    # local image build (docker, ansible, zstd)
 ```
 
 ## Architecture
@@ -27,6 +28,12 @@ go test ./internal/provision/ -run TestSpawnRunsExactSequence   # single test
   conversion). Tests assert exact request bodies against `githubtest.Fake`.
 - `internal/provision`, `internal/reconcile`: spawn and cleanup; state lives only in guest tags.
 - `internal/setup`: one-time setup page (manifest flow, one private App per org).
+- `internal/images`: published runner images: resolve release, verify signed SHA256SUMS, cache in
+  the vztmpl dir, `pct create` a template in `images.vmid_range`, prune by age. `pve.OwnedTemplate`
+  (tag `gh-template` AND inside that range) guards template deletion; keep it.
+- `templates/`: image definitions (`<name>/template.yaml`) and Ansible roles; `templates/build.sh`
+  builds one in Docker and `.github/workflows/templates.yml` publishes it. Every tarball a role
+  downloads is checksum-verified against its publisher's sums.
 - `internal/update`: self-update (ed25519-signed SHA256SUMS, atomic swap, health-checked rollback).
 - `internal/config`: YAML with validation and forward migration (`version`).
 

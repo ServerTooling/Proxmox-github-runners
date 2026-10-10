@@ -12,9 +12,12 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"text/tabwriter"
 	"time"
@@ -22,6 +25,7 @@ import (
 	"github.com/ServerTooling/proxmox-github-runners/internal/buildinfo"
 	"github.com/ServerTooling/proxmox-github-runners/internal/config"
 	"github.com/ServerTooling/proxmox-github-runners/internal/github"
+	"github.com/ServerTooling/proxmox-github-runners/internal/images"
 	"github.com/ServerTooling/proxmox-github-runners/internal/notify"
 	"github.com/ServerTooling/proxmox-github-runners/internal/provision"
 	"github.com/ServerTooling/proxmox-github-runners/internal/pve"
@@ -39,14 +43,18 @@ const (
 const usage = `pve-runners: ephemeral GitHub Actions runners on Proxmox VE
 
 Usage:
-  pve-runners setup [--listen :8765]          first-run setup page (GitHub Apps, orgs, template)
+  pve-runners setup [--listen :8765] [--open-firewall]
+                                              first-run setup page (GitHub Apps, orgs, template);
+                                              --open-firewall allows the port until setup ends
   pve-runners run                             the service: reconcile + self-update loops
   pve-runners spawn --pool NAME --owner ORG [--repo NAME]
                                               create one ephemeral runner now
   pve-runners reconcile                       destroy finished or expired runners once
   pve-runners status                          show runners on this host
   pve-runners template prepare --ctid ID      install the runner into a container and make it a template
-  pve-runners config validate|show            check or print the config (secrets are never in it)
+  pve-runners images list|pull|prune          runner images: show templates, fetch pools' images now, age out old ones
+  pve-runners config init|validate|show       write the default config (never over a non-empty one),
+                                              check it, or print it (secrets are never in it)
   pve-runners update [--now]                  check for (and install) a newer release
   pve-runners version
 
@@ -79,10 +87,11 @@ func run(args []string) error {
 		return nil
 	case "setup":
 		listen := fs.String("listen", ":8765", "address for the setup page")
+		openFW := fs.Bool("open-firewall", false, "allow the setup port through the Proxmox host firewall until setup ends")
 		if err := fs.Parse(rest); err != nil {
 			return err
 		}
-		return cmdSetup(ctx, *cfgPath, *listen)
+		return cmdSetup(ctx, *cfgPath, *listen, *openFW)
 	case "run":
 		if err := fs.Parse(rest); err != nil {
 			return err
@@ -123,11 +132,28 @@ func run(args []string) error {
 			return err
 		}
 		return cmdTemplatePrepare(ctx, *cfgPath, *ctid)
-	case "config":
+	case "images":
 		if len(rest) == 0 {
-			return errors.New("usage: pve-runners config validate|show")
+			return errors.New("usage: pve-runners images list|pull|prune")
 		}
 		if err := fs.Parse(rest[1:]); err != nil {
+			return err
+		}
+		return cmdImages(ctx, *cfgPath, rest[0])
+	case "config":
+		if len(rest) == 0 {
+			return errors.New("usage: pve-runners config init|validate|show")
+		}
+		if err := fs.Parse(rest[1:]); err != nil {
+			return err
+		}
+		if rest[0] == "init" {
+			wrote, err := config.Init(*cfgPath, nodeName())
+			if err == nil && wrote {
+				fmt.Printf("wrote %s with the default settings\n", *cfgPath)
+			} else if err == nil {
+				fmt.Printf("%s already has settings; left it as is\n", *cfgPath)
+			}
 			return err
 		}
 		data, err := os.ReadFile(*cfgPath)
@@ -217,19 +243,124 @@ func githubFor(cfg *config.Config) func(config.Target) (provision.JITSource, err
 	}
 }
 
-func provisioner(cfg *config.Config) *provision.Provisioner {
-	return &provision.Provisioner{Cfg: cfg, Host: host(cfg), GitHub: githubFor(cfg), Now: time.Now, TmpDir: os.TempDir()}
+func imageManager(ctx context.Context, cfg *config.Config) (*images.Manager, error) {
+	h := host(cfg)
+	probe, err := h.VolumePath(ctx, cfg.Images.CacheStorage+":vztmpl/probe.tar.zst")
+	if err != nil {
+		return nil, fmt.Errorf("images.cache_storage %q: %w", cfg.Images.CacheStorage, err)
+	}
+	return &images.Manager{Repo: cfg.Images.Repo, APIBase: github.DefaultAPI, HTTP: &http.Client{Timeout: 30 * time.Minute},
+		PublicKey: buildinfo.UpdatePublicKey, GOARCH: runtime.GOARCH, Host: h, Range: cfg.Images.VMIDRange,
+		CacheDir: filepath.Dir(probe), CacheStorage: cfg.Images.CacheStorage, Storage: cfg.Proxmox.Storage,
+		Pool: cfg.Proxmox.Pool, Bridge: cfg.Proxmox.Bridge, RootfsGB: cfg.Images.RootfsGB,
+		Retention: time.Duration(cfg.Images.RetentionDays) * 24 * time.Hour, Now: time.Now}, nil
 }
 
-func cmdSetup(ctx context.Context, cfgPath, listen string) error {
-	cfg := config.Default()
-	if existing, err := config.Load(cfgPath); err == nil {
-		cfg = existing // re-running setup adds to the current config
-	} else if !errors.Is(err, os.ErrNotExist) {
+// imageRefs lists the distinct images the pools use, in a stable order.
+func imageRefs(cfg *config.Config) []images.Ref {
+	var refs []images.Ref
+	seen := map[string]bool{}
+	for _, n := range cfg.PoolNames() {
+		if img := cfg.Pools[n].Image; img != "" && !seen[img] {
+			seen[img] = true
+			refs = append(refs, images.ParseRef(img))
+		}
+	}
+	return refs
+}
+
+func provisioner(ctx context.Context, cfg *config.Config) (*provision.Provisioner, error) {
+	p := &provision.Provisioner{Cfg: cfg, Host: host(cfg), GitHub: githubFor(cfg), Now: time.Now, TmpDir: os.TempDir()}
+	if len(imageRefs(cfg)) > 0 {
+		m, err := imageManager(ctx, cfg)
+		if err != nil {
+			return nil, err
+		}
+		p.Templates = func(ctx context.Context, image string) (int, error) { return m.Ensure(ctx, images.ParseRef(image)) }
+	}
+	return p, nil
+}
+
+// syncImages makes sure every pool's image has a template (pull), then ages out old templates and
+// archives (prune).
+func syncImages(ctx context.Context, cfg *config.Config, m *images.Manager, pull, prune bool) error {
+	var errs []error
+	refs := imageRefs(cfg)
+	for _, r := range refs {
+		if !pull {
+			break
+		}
+		id, err := m.Ensure(ctx, r)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("image %s: %w", r, err))
+			continue
+		}
+		slog.Info("image ready", "image", r.String(), "template", id)
+	}
+	if !prune {
+		return errors.Join(errs...)
+	}
+	runners, err := host(cfg).Runners(ctx)
+	if err != nil {
+		return errors.Join(append(errs, err)...)
+	}
+	removed, err := m.Prune(ctx, refs, images.InUse(runners))
+	for _, r := range removed {
+		slog.Info("image pruned", "what", r.What, "reason", r.Reason)
+	}
+	return errors.Join(append(errs, err)...)
+}
+
+func cmdImages(ctx context.Context, cfgPath, sub string) error {
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		return err
+	}
+	m, err := imageManager(ctx, cfg)
+	if err != nil {
+		return err
+	}
+	switch sub {
+	case "list":
+		tpls, err := m.Host.Templates(ctx, m.Range)
+		if err != nil {
+			return err
+		}
+		sort.Slice(tpls, func(i, j int) bool { return tpls[i].VMID < tpls[j].VMID })
+		w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
+		fmt.Fprintln(w, "ID\tIMAGE\tRELEASE\tCREATED")
+		for _, g := range tpls {
+			when := "incomplete"
+			var sec int64
+			if _, err := fmt.Sscan(g.TagValue("created"), &sec); err == nil && g.Template == 1 {
+				when = time.Unix(sec, 0).Format(time.DateOnly)
+			}
+			fmt.Fprintf(w, "%d\t%s\t%s%s\t%s\n", g.VMID, g.TagValue("image"), images.TagPrefix, g.TagValue("rel"), when)
+		}
+		return w.Flush()
+	case "pull", "prune":
+		return syncImages(ctx, cfg, m, sub == "pull", sub == "prune")
+	}
+	return fmt.Errorf("unknown images command %q; use list, pull or prune", sub)
+}
+
+// nodeName is this host's Proxmox node name, which Proxmox takes from the short hostname.
+func nodeName() string {
+	h, _ := os.Hostname()
+	return strings.SplitN(h, ".", 2)[0]
+}
+
+func cmdSetup(ctx context.Context, cfgPath, listen string, openFirewall bool) error {
+	// A missing or empty config starts from the defaults; re-running setup adds to an existing one.
+	if _, err := config.Init(cfgPath, nodeName()); err != nil {
+		return err
+	}
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
 		return err
 	}
 	if cfg.Proxmox.Node == "" {
-		cfg.Proxmox.Node, _ = os.Hostname()
+		cfg.Proxmox.Node = nodeName()
 	}
 	s, err := setup.NewServer(cfg, cfgPath)
 	if err != nil {
@@ -241,10 +372,51 @@ func cmdSetup(ctx context.Context, cfgPath, listen string) error {
 	}
 	srv := &http.Server{Handler: s.Handler(), ReadHeaderTimeout: 10 * time.Second}
 	go func() { _ = srv.Serve(ln) }()
-	port := ln.Addr().(*net.TCPAddr).Port
-	fmt.Println("Open this link in a browser on your network to finish setup:")
-	for _, ip := range hostIPs() {
-		fmt.Printf("  http://%s:%d/?t=%s\n", ip, port, s.Token)
+	addr := ln.Addr().(*net.TCPAddr)
+	port := addr.Port
+
+	h := host(cfg)
+	inputBlocked, _ := h.HostInputBlocked(ctx)
+	if openFirewall {
+		// Clear a rule left by a run that was killed, then open the port for this run only.
+		_ = h.CloseSetupPort(ctx)
+		closeFn, err := h.OpenSetupPort(ctx, port)
+		if err != nil {
+			return fmt.Errorf("open port %d in the Proxmox firewall: %w", port, err)
+		}
+		defer func() {
+			if err := closeFn(context.Background()); err != nil {
+				fmt.Fprintf(os.Stderr, "remove the temporary firewall rule by hand (comment %q): %v\n", pve.SetupRuleComment, err)
+			}
+		}()
+	}
+
+	ips := []string{addr.IP.String()}
+	if addr.IP.IsUnspecified() {
+		ips = setup.OrderAddrs(hostIPs(), preferredIPs())
+	}
+	link := func(ip string) string {
+		return fmt.Sprintf("http://%s/?t=%s", net.JoinHostPort(ip, strconv.Itoa(port)), s.Token)
+	}
+	fmt.Printf("Open the setup page in a browser (it listens on port %d):\n", port)
+	note := ""
+	if pref := preferredIPs(); len(pref) > 0 && pref[0] == ips[0] {
+		note = "   <- recommended: the address the Proxmox web UI is on"
+	}
+	fmt.Printf("  %s%s\n", link(ips[0]), note)
+	if len(ips) > 1 {
+		fmt.Println("Other addresses of this host, only if that one doesn't load from your computer:")
+		for _, ip := range ips[1:] {
+			fmt.Printf("  %s\n", link(ip))
+		}
+	}
+	switch {
+	case openFirewall:
+		fmt.Printf("Port %d is allowed through the Proxmox firewall until setup ends.\n", port)
+	case inputBlocked:
+		fmt.Printf("The Proxmox firewall drops inbound connections (input policy DROP), so port %d is blocked. Either:\n", port)
+		fmt.Printf("  - stop this (Ctrl+C) and run: pve-runners setup --open-firewall   (allows the port until setup ends), or\n")
+		fmt.Printf("  - from your computer run: ssh -L %d:127.0.0.1:%d root@%s   then open %s\n", port, port, ips[0], link("127.0.0.1"))
 	}
 	fmt.Println("The page closes itself when setup is done (Ctrl+C to abort).")
 	select {
@@ -271,6 +443,26 @@ func hostIPs() []string {
 	return out
 }
 
+// preferredIPs are the addresses most likely to be reachable from the owner's computer: the one the
+// node name resolves to (Proxmox requires that to be the management address the web UI is on),
+// then the source address of the default route.
+func preferredIPs() []string {
+	var out []string
+	if addrs, err := net.LookupHost(nodeName()); err == nil {
+		for _, a := range addrs {
+			if ip := net.ParseIP(a); ip != nil && ip.To4() != nil && !ip.IsLoopback() {
+				out = append(out, a)
+			}
+		}
+	}
+	// A UDP "connection" sends nothing; it only asks the kernel which source address it would use.
+	if c, err := net.Dial("udp4", "192.0.2.1:9"); err == nil {
+		out = append(out, c.LocalAddr().(*net.UDPAddr).IP.String())
+		c.Close()
+	}
+	return out
+}
+
 func findTarget(cfg *config.Config, owner string) (config.Target, error) {
 	for _, t := range cfg.Targets {
 		if strings.EqualFold(t.Owner(), owner) {
@@ -292,7 +484,11 @@ func cmdSpawn(ctx context.Context, cfgPath, pool, owner, repo string) error {
 	if err != nil {
 		return err
 	}
-	res, err := provisioner(cfg).Spawn(ctx, provision.Request{Pool: pool, Target: t, Repo: repo})
+	p, err := provisioner(ctx, cfg)
+	if err != nil {
+		return err
+	}
+	res, err := p.Spawn(ctx, provision.Request{Pool: pool, Target: t, Repo: repo})
 	if err != nil {
 		notifier(cfg).Send(ctx, notify.SpawnFailed, fmt.Sprintf("pool %s for %s: %v", pool, t.Owner(), err))
 		return err
@@ -339,8 +535,7 @@ func cmdTemplatePrepare(ctx context.Context, cfgPath string, ctid int) error {
 	}
 	cfg, err := config.Load(cfgPath)
 	if errors.Is(err, os.ErrNotExist) {
-		cfg = config.Default() // template prep can run before setup
-		cfg.Proxmox.Node, _ = os.Hostname()
+		cfg = config.Initial(nodeName()) // template prep can run before setup
 	} else if err != nil {
 		return err
 	}
@@ -408,8 +603,31 @@ func cmdRun(ctx context.Context, cfgPath string) error {
 	signal.Notify(reload, syscall.SIGHUP)
 	reconcileTick := time.NewTicker(30 * time.Second)
 	updateTick := time.NewTicker(cfg.Update.Interval)
+	imageTick := time.NewTicker(cfg.Images.CheckInterval)
 	defer reconcileTick.Stop()
 	defer updateTick.Stop()
+	defer imageTick.Stop()
+
+	// Image downloads can take minutes, so they run beside the loop, one sync at a time. The first
+	// one starts now so a new image is ready before the first job needs it.
+	var imageBusy atomic.Bool
+	syncImagesAsync := func(cfg *config.Config) {
+		if len(imageRefs(cfg)) == 0 || !imageBusy.CompareAndSwap(false, true) {
+			return
+		}
+		go func() {
+			defer imageBusy.Store(false)
+			m, err := imageManager(ctx, cfg)
+			if err == nil {
+				err = syncImages(ctx, cfg, m, true, true)
+			}
+			if err != nil && ctx.Err() == nil {
+				slog.Error("images", "err", err)
+				n.Send(ctx, notify.ImageFailed, err.Error())
+			}
+		}()
+	}
+	syncImagesAsync(cfg)
 	for {
 		select {
 		case <-ctx.Done():
@@ -422,6 +640,9 @@ func cmdRun(ctx context.Context, cfgPath string) error {
 			}
 			cfg = c
 			slog.Info("config reloaded")
+			syncImagesAsync(cfg)
+		case <-imageTick.C:
+			syncImagesAsync(cfg)
 		case <-reconcileTick.C:
 			done, err := reconcile.Once(ctx, cfg, host(cfg), time.Now())
 			for _, a := range done {
@@ -431,7 +652,8 @@ func cmdRun(ctx context.Context, cfgPath string) error {
 				slog.Error("reconcile", "err", err)
 			}
 		case <-updateTick.C:
-			if !cfg.Update.Enabled || u.Pending() || provision.Busy() {
+			// A restart mid-download would only waste the download, but there's no reason to.
+			if !cfg.Update.Enabled || u.Pending() || provision.Busy() || imageBusy.Load() {
 				continue
 			}
 			if err := cmdUpdate(ctx, cfg, true); err != nil {

@@ -3,13 +3,13 @@
 Ephemeral GitHub Actions self-hosted runners on Proxmox VE.
 
 `pve-runners` is a single binary that runs as a root service on a Proxmox host. For the private
-repositories of the GitHub organizations you choose, it creates an LXC container from a prepared
-template, registers it as a single-use (JIT) runner, and destroys it as soon as the job finishes.
+repositories of the GitHub organizations you choose, it creates an LXC container from a runner image
+built in this repo's CI (Ubuntu 24.04 with Python, Go, Node, Helm, kubectl and Docker), registers it as a single-use (JIT) runner, and destroys it as soon as the job finishes.
 Runners get internet access but no access to your LAN. The service keeps itself updated from this
 repository's releases.
 
-> Status: Phase 1. Runners are created on demand with `pve-runners spawn`; automatic scaling from
-> GitHub's job queue, CI-built template images and more are next. See [docs/plan.md](docs/plan.md).
+> Status: Phase 2. Runners are created on demand with `pve-runners spawn` from CI-built images;
+> automatic scaling from GitHub's job queue is next. See [docs/plan.md](docs/plan.md).
 
 ## How it works
 
@@ -19,6 +19,10 @@ repository's releases.
 - **Runners:** `pct clone` of your template into the reserved ID range, tagged `gh-runner`, firewall
   on, single-use runner config pushed in, runner started. The runner takes one job and powers the
   container off; the reconcile loop destroys it within 30 seconds.
+- **Images:** [templates/](templates/) defines runner images with Ansible. CI builds, smoke-tests,
+  signs and publishes them as `template-<name>-<date>-<run>` releases. The host downloads the newest
+  one, checks the signature and checksum, keeps it in the Proxmox template cache and creates a
+  template container from it (IDs 8900-8999). Old images age out after `images.retention_days`.
 - **Safety:** the tool only ever modifies containers that carry its tag *and* sit in its ID range.
   Public repositories are refused (runner groups that allow them are rejected, and repo-level
   runners check visibility). Runners can't reach private, link-local or CGNAT addresses, only DNS
@@ -32,18 +36,22 @@ On the Proxmox host, as root:
 curl -fsSL https://github.com/ServerTooling/proxmox-github-runners/releases/latest/download/install.sh | sh
 ```
 
-Then:
+The installer writes `/etc/pve-runners/config.yaml` with every setting at its default and a comment
+explaining each one (an existing config is never overwritten). Then:
 
-1. **Firewall:** turn on the datacenter firewall (Datacenter > Firewall > Options) after checking
-   your own access rules allow you into the web UI and SSH. Runner isolation depends on it.
-2. **Template:** create an unprivileged Ubuntu 24.04 container with an ID outside 9000-9499 (for
-   example 8000) and run `pve-runners template prepare --ctid 8000`. This installs the pinned,
-   checksum-verified GitHub runner and turns the container into a template.
-3. **Connect GitHub:** run `pve-runners setup` and open the printed link. For each org, click
+1. **Firewall:** in Datacenter > Firewall > Options, set **Input Policy** to `ACCEPT` unless you
+   already manage host rules, then set **Firewall** to `Yes`. Runner isolation needs the firewall on,
+   but it comes from rules pve-runners puts on each runner, not from the input policy; with `DROP`,
+   turning the firewall on can lock you out of the host.
+2. **Connect GitHub:** run `pve-runners setup --open-firewall` and open the first printed link (the
+   address of the Proxmox web UI). `--open-firewall` lets port 8765 through the Proxmox firewall
+   until setup finishes; it is only needed when the input policy is `DROP`. For each org, click
    through "Create GitHub App" and "Install" on github.com. Make sure the org's runner group does not
-   allow public repositories.
-4. **Start:** `systemctl enable --now pve-runners`.
-5. **Use it:** `runs-on: proxmox` in a workflow, then `pve-runners spawn --owner your-org` to start a
+   allow public repositories. Leave the template field empty to use the published `ubuntu-latest`
+   image.
+3. **Start:** `systemctl enable --now pve-runners`. The service downloads the image and creates its
+   template right away (`pve-runners images list` shows it).
+4. **Use it:** `runs-on: proxmox` in a workflow, then `pve-runners spawn --owner your-org` to start a
    runner for it.
 
 ## Commands
@@ -54,7 +62,8 @@ Then:
 | `pve-runners spawn --owner ORG [--pool default] [--repo R]` | Start one ephemeral runner |
 | `pve-runners status` | Runners on this host and pending cleanup |
 | `pve-runners reconcile` | Destroy finished or expired runners now |
-| `pve-runners template prepare --ctid ID` | Make a runner template from a container |
+| `pve-runners images list\|pull\|prune` | Show image templates, fetch pools' images now, age out old ones |
+| `pve-runners template prepare --ctid ID` | Make a custom runner template from a container you built |
 | `pve-runners config validate` | Check `/etc/pve-runners/config.yaml` |
 | `pve-runners update [--now]` | Check for, or install, a newer release |
 

@@ -20,6 +20,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -140,7 +141,11 @@ func (s *Server) fail(w http.ResponseWriter, r *http.Request, msg string) {
 }
 
 func (s *Server) saveHost(w http.ResponseWriter, r *http.Request) {
-	tpl, err1 := strconv.Atoi(r.FormValue("template"))
+	// An empty template ID means the published ubuntu-latest image, which the service downloads.
+	tpl, err1 := 0, error(nil)
+	if v := strings.TrimSpace(r.FormValue("template")); v != "" {
+		tpl, err1 = strconv.Atoi(v)
+	}
 	maxR, err2 := strconv.Atoi(r.FormValue("max_runners"))
 	if err1 != nil || err2 != nil {
 		s.fail(w, r, "Template ID and max runners must be numbers.")
@@ -149,12 +154,18 @@ func (s *Server) saveHost(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	s.Cfg.Proxmox.Node = strings.TrimSpace(r.FormValue("node"))
 	s.Cfg.Proxmox.MaxRunners = maxR
+	if b := strings.TrimSpace(r.FormValue("bridge")); b != "" {
+		s.Cfg.Proxmox.Bridge = b
+	}
 	p := s.Cfg.Pools["default"]
 	if p == nil {
 		p = &config.Pool{Type: "lxc", Mode: "ephemeral", Labels: []string{"proxmox"}}
 		s.Cfg.Pools["default"] = p
 	}
-	p.Template = tpl
+	p.Template, p.Image = tpl, ""
+	if tpl == 0 {
+		p.Image = config.DefaultImage
+	}
 	s.errMsg = ""
 	s.mu.Unlock()
 	http.Redirect(w, r, "/", http.StatusSeeOther)
@@ -357,8 +368,11 @@ var indexTmpl = template.Must(template.New("index").Parse(page + `
 {{if .Error}}<p class="err">{{.Error}}</p>{{end}}
 <form method="post" action="/host"><fieldset><legend>1. This Proxmox host</legend>
 <p><label>Node name <input name="node" value="{{.Cfg.Proxmox.Node}}" required></label></p>
-<p><label>Runner template container ID <input name="template" value="{{if .Template}}{{.Template}}{{end}}" size="6" required></label><br>
-<small>A container prepared with <code>pve-runners template prepare</code>, outside IDs {{index .Cfg.Proxmox.VMIDRange 0}}-{{index .Cfg.Proxmox.VMIDRange 1}}.</small></p>
+<p><label>Runner template container ID <input name="template" value="{{if .Template}}{{.Template}}{{end}}" size="6" placeholder="optional"></label><br>
+<small>Leave empty to use the published <code>ubuntu-latest</code> image (Python, Go, Node, Helm, kubectl, Docker), which is downloaded automatically.
+Or enter a container you prepared with <code>pve-runners template prepare</code>, outside IDs {{index .Cfg.Proxmox.VMIDRange 0}}-{{index .Cfg.Proxmox.VMIDRange 1}}.</small></p>
+<p><label>Network bridge for runners <input name="bridge" value="{{.Cfg.Proxmox.Bridge}}" size="8"></label><br>
+<small>Runners get internet access through this bridge; the LAN stays blocked by the firewall.</small></p>
 <p><label>Max runners at once <input name="max_runners" value="{{.Cfg.Proxmox.MaxRunners}}" size="3"></label></p>
 <button>Save</button></fieldset></form>
 
@@ -380,3 +394,23 @@ var redirectTmpl = template.Must(template.New("redirect").Parse(page + `
 
 var doneTmpl = template.Must(template.New("done").Parse(page + `
 <h1>Setup complete</h1><p>Config written to <code>{{.Path}}</code>. You can close this page; the service starts now.</p></body></html>`))
+
+// OrderAddrs puts the preferred addresses (in their order, when the host has them) ahead of the
+// rest, so the first setup link is the one most likely to load: the Proxmox web UI's address.
+func OrderAddrs(addrs, preferred []string) []string {
+	var out []string
+	seen := map[string]bool{}
+	for _, p := range preferred {
+		if p != "" && !seen[p] && slices.Contains(addrs, p) {
+			seen[p] = true
+			out = append(out, p)
+		}
+	}
+	for _, a := range addrs {
+		if !seen[a] {
+			seen[a] = true
+			out = append(out, a)
+		}
+	}
+	return out
+}

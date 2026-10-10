@@ -1,0 +1,114 @@
+name: Templates
+
+# Builds the LXC runner template images in templates/ and publishes each as a
+# template-<name>-<yyyymmdd>-<run> release. Pull requests only build and smoke-test; main, the weekly
+# rebuild (security updates, new tool versions) and manual runs publish. Hosts verify the signed
+# SHA256SUMS with the same key as tool updates before using an image.
+on:
+  pull_request:
+    paths:
+      - templates/**
+      - packaging/runner-version
+      - internal/provision/template-setup.sh
+      - .github/workflows/templates.yml
+  push:
+    branches: [main]
+    paths:
+      - templates/**
+      - packaging/runner-version
+      - internal/provision/template-setup.sh
+      - .github/workflows/templates.yml
+  schedule:
+    - cron: "17 4 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: templates-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  list:
+    runs-on: ubuntu-latest
+    outputs:
+      names: ${{ steps.list.outputs.names }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: list
+        run: echo "names=$(ls templates/*/template.yaml | cut -d/ -f2 | jq -Rnc '[inputs]')" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: list
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        name: ${{ fromJSON(needs.list.outputs.names) }}
+    env:
+      UPDATE_SIGNING_KEY: ${{ secrets.UPDATE_SIGNING_KEY }}
+      GH_TOKEN: ${{ github.token }}
+      PUBLISH: ${{ github.event_name != 'pull_request' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Install Ansible
+        run: |
+          pipx install --include-deps 'ansible==12.*'
+          sudo apt-get install -y -qq zstd
+
+      - name: Pin and verify actions/runner
+        run: |
+          RV=$(tr -d ' \n' < packaging/runner-version)
+          notes=$(gh api "repos/actions/runner/releases/tags/v$RV" --jq .body)
+          curl -fsSL -o runner.tgz "https://github.com/actions/runner/releases/download/v$RV/actions-runner-linux-x64-$RV.tar.gz"
+          sha=$(sha256sum runner.tgz | cut -d' ' -f1)
+          grep -q "$sha" <<<"$notes" || { echo "::error::actions/runner $RV linux-x64 hash not in its release notes"; exit 1; }
+          rm -f runner.tgz
+          echo "RUNNER_VERSION=$RV" >> "$GITHUB_ENV"
+          echo "RUNNER_SHA256=$sha" >> "$GITHUB_ENV"
+
+      - name: Release tag
+        run: echo "TAG=template-${{ matrix.name }}-$(date -u +%Y%m%d)-${GITHUB_RUN_NUMBER}" >> "$GITHUB_ENV"
+
+      - name: Build and smoke-test
+        run: BUILD_ID="$TAG" templates/build.sh "${{ matrix.name }}" dist
+
+      - name: Check size
+        run: |
+          # GitHub release assets are capped at 2 GiB.
+          size=$(stat -c %s dist/*.tar.zst)
+          echo "image is $((size >> 20)) MiB"
+          [ "$size" -lt $((1900 << 20)) ] || { echo "::error::image is over the 1.9 GiB budget"; exit 1; }
+
+      - name: Sign
+        if: env.PUBLISH == 'true'
+        run: |
+          if [ -z "$UPDATE_SIGNING_KEY" ]; then
+            echo "::error::Repository secret UPDATE_SIGNING_KEY is missing; nothing was published."
+            exit 1
+          fi
+          (cd dist && sha256sum * > SHA256SUMS)
+          go run ./tools/sign sign dist/SHA256SUMS
+
+      - name: Privacy scan (image metadata)
+        run: scripts/privacy-scan.sh dist/*.json
+
+      - name: Publish
+        if: env.PUBLISH == 'true'
+        run: |
+          {
+            echo "Runner template image \`${{ matrix.name }}\`, built from main at ${GITHUB_SHA::7}."
+            echo
+            echo "Pools with \`image: ${{ matrix.name }}\` pick up the newest one automatically."
+            echo
+            echo '```json'
+            cat dist/*.json
+            echo '```'
+          } > notes.md
+          gh release create "$TAG" dist/* --target "$GITHUB_SHA" --title "$TAG" --notes-file notes.md --latest=false

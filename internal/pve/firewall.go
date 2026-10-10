@@ -150,3 +150,75 @@ func (h *Host) EnsureEgressGroup(ctx context.Context, rules []Rule) error {
 	}
 	return nil
 }
+
+// SetupRuleComment marks the temporary rule `pve-runners setup --open-firewall` adds, so it can be
+// found and removed again without touching the owner's own rules.
+const SetupRuleComment = "pve-runners setup (temporary)"
+
+func nodeRulesPath(node string) string { return "/nodes/" + node + "/firewall/rules" }
+
+func NodeRulesGetCmd(node string) Cmd {
+	return Cmd{"pvesh", []string{"get", nodeRulesPath(node), "--output-format", "json"}}
+}
+
+// SetupRuleAddCmd lets the setup page through the host firewall, which with the datacenter
+// firewall on only allows the Proxmox UI, SSH and console ports by default.
+func SetupRuleAddCmd(node string, port int) Cmd {
+	return Cmd{"pvesh", []string{"create", nodeRulesPath(node), "--type", "in", "--action", "ACCEPT",
+		"--proto", "tcp", "--dport", strconv.Itoa(port), "--enable", "1", "--comment", SetupRuleComment}}
+}
+
+func NodeRuleDeleteCmd(node string, pos int) Cmd {
+	return Cmd{"pvesh", []string{"delete", nodeRulesPath(node) + "/" + strconv.Itoa(pos)}}
+}
+
+// OpenSetupPort adds the temporary rule and returns a func that removes it (and any left over from
+// an earlier run that was killed).
+func (h *Host) OpenSetupPort(ctx context.Context, port int) (closeFn func(context.Context) error, err error) {
+	if err := h.Exec(ctx, SetupRuleAddCmd(h.Node, port)); err != nil {
+		return nil, err
+	}
+	return h.CloseSetupPort, nil
+}
+
+// CloseSetupPort deletes every rule carrying SetupRuleComment, highest position first so earlier
+// positions stay valid.
+func (h *Host) CloseSetupPort(ctx context.Context) error {
+	out, err := h.run(ctx, NodeRulesGetCmd(h.Node))
+	if err != nil {
+		return err
+	}
+	var rules []struct {
+		Pos     int    `json:"pos"`
+		Comment string `json:"comment"`
+	}
+	if err := json.Unmarshal(out, &rules); err != nil {
+		return fmt.Errorf("parse node firewall rules: %w", err)
+	}
+	sort.Slice(rules, func(i, j int) bool { return rules[i].Pos > rules[j].Pos })
+	for _, r := range rules {
+		if r.Comment == SetupRuleComment {
+			if err := h.Exec(ctx, NodeRuleDeleteCmd(h.Node, r.Pos)); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// HostInputBlocked reports whether the datacenter firewall is on with an inbound policy that drops
+// connections to the host (Proxmox's default is DROP), which blocks the setup page.
+func (h *Host) HostInputBlocked(ctx context.Context) (bool, error) {
+	out, err := h.run(ctx, ClusterFirewallOptionsCmd())
+	if err != nil {
+		return false, err
+	}
+	var o struct {
+		Enable   int    `json:"enable"`
+		PolicyIn string `json:"policy_in"`
+	}
+	if err := json.Unmarshal(out, &o); err != nil {
+		return false, fmt.Errorf("parse firewall options: %w", err)
+	}
+	return o.Enable == 1 && o.PolicyIn != "ACCEPT", nil
+}

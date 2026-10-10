@@ -7,6 +7,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -52,13 +53,20 @@ type Proxmox struct {
 	Pool            string `yaml:"pool"`
 	Storage         string `yaml:"storage"`
 	MinFreeMemoryMB int    `yaml:"min_free_memory_mb"`
+	// Bridge is the network bridge runner NICs (and image templates) attach to; a pool can override it.
+	Bridge string `yaml:"bridge"`
 }
 
 type GitHub struct {
 	APIURL        string `yaml:"api_url"`
 	RunnerVersion string `yaml:"runner_version"`
 	RunnerSHA256  string `yaml:"runner_sha256"`
+	// pinned records that the file set the runner version, so Render writes it back only then.
+	pinned bool
 }
+
+// Pinned reports whether the config pins actions/runner rather than following this build.
+func (g GitHub) Pinned() bool { return g.pinned }
 
 // Target is one account the service serves: an org (org-level runners) or a personal account
 // (repo-level runners, since personal accounts have no org runner groups).
@@ -87,9 +95,10 @@ func (t Target) Owner() string {
 }
 
 type Pool struct {
-	Type        string        `yaml:"type"` // lxc | vm (vm arrives in a later phase)
-	Template    int           `yaml:"template"`
-	Mode        string        `yaml:"mode"` // ephemeral | permanent
+	Type        string        `yaml:"type"`               // lxc | vm (vm arrives in a later phase)
+	Template    int           `yaml:"template,omitempty"` // a template container prepared by hand, or
+	Image       string        `yaml:"image,omitempty"`    // a published image: name, or name@release-tag to pin
+	Mode        string        `yaml:"mode"`               // ephemeral | permanent
 	Labels      []string      `yaml:"labels"`
 	Cores       int           `yaml:"cores"`
 	MemoryMB    int           `yaml:"memory_mb"`
@@ -119,11 +128,22 @@ type Notify struct {
 	Format         string `yaml:"format,omitempty"` // auto | ntfy | discord | slack
 }
 
-// Images controls template images downloaded from GitHub releases. Runner containers are destroyed
-// as soon as their job ends; images are kept and only aged out by RetentionDays. An image a pool
-// still uses, and the newest image of each name, are never deleted regardless of age.
+// Images controls template images downloaded from GitHub releases (see templates/ in this repo).
+// Runner containers are destroyed as soon as their job ends; images are kept and only aged out by
+// RetentionDays. The newest image of each name, pinned images, and images that runners were cloned
+// from are never deleted regardless of age.
 type Images struct {
 	RetentionDays int `yaml:"retention_days"`
+	// Repo publishes the images; defaults to update.repo.
+	Repo string `yaml:"repo,omitempty"`
+	// VMIDRange holds the template containers made from images; it must not overlap proxmox.vmid_range.
+	VMIDRange [2]int `yaml:"vmid_range"`
+	// CacheStorage is the Proxmox storage whose vztmpl directory keeps downloaded archives.
+	CacheStorage string `yaml:"cache_storage"`
+	// RootfsGB is the template's root disk; runners grow it to their pool's disk_gb.
+	RootfsGB int `yaml:"rootfs_gb"`
+	// CheckInterval is how often the service looks for newer images and prunes old ones.
+	CheckInterval time.Duration `yaml:"check_interval"`
 }
 
 type Update struct {
@@ -137,14 +157,16 @@ type Update struct {
 func Default() *Config {
 	return &Config{
 		Version: CurrentVersion,
-		Proxmox: Proxmox{MaxRunners: 4, VMIDRange: [2]int{9000, 9499}, Pool: "gh-runners", Storage: "local-lvm", MinFreeMemoryMB: 2048},
+		Proxmox: Proxmox{MaxRunners: 4, VMIDRange: [2]int{9000, 9499}, Pool: "gh-runners", Storage: "local-lvm", MinFreeMemoryMB: 2048,
+			Bridge: "vmbr0"},
 		GitHub: GitHub{
 			APIURL:        "https://api.github.com",
 			RunnerVersion: buildinfo.RunnerVersion,
 			RunnerSHA256:  buildinfo.RunnerSHA256,
 		},
-		Pools:  map[string]*Pool{},
-		Images: Images{RetentionDays: 30},
+		Pools: map[string]*Pool{},
+		Images: Images{RetentionDays: 30, VMIDRange: [2]int{8900, 8999}, CacheStorage: "local", RootfsGB: 16,
+			CheckInterval: 6 * time.Hour},
 		Network: Network{
 			Blocked: append([]string(nil), pve.DefaultBlocked...),
 			// Runners still need name resolution and DHCP leases, which at home usually come from
@@ -156,6 +178,30 @@ func Default() *Config {
 			Repo: "ServerTooling/proxmox-github-runners",
 		},
 	}
+}
+
+// DefaultImage is the published runner image a new host's default pool uses.
+const DefaultImage = "ubuntu-latest"
+
+// Initial is the config a fresh install starts from: every default, plus one pool on the published
+// image with the `proxmox` label. Setup adds the GitHub targets.
+func Initial(node string) *Config {
+	c := Default()
+	c.Proxmox.Node = node
+	c.Pools["default"] = &Pool{Image: DefaultImage, Labels: []string{"proxmox"}}
+	c.applyDefaults()
+	return c
+}
+
+// Init writes Initial(node) to path unless a non-empty file is already there, and reports whether it
+// wrote. Existing configs are never overwritten.
+func Init(path, node string) (bool, error) {
+	if data, err := os.ReadFile(path); err == nil && strings.TrimSpace(string(data)) != "" {
+		return false, nil
+	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return false, err
+	}
+	return true, Initial(node).Save(path)
 }
 
 func (c *Config) applyDefaults() {
@@ -175,11 +221,16 @@ func (c *Config) applyDefaults() {
 	if c.Proxmox.Storage == "" {
 		c.Proxmox.Storage = d.Proxmox.Storage
 	}
+	if c.Proxmox.Bridge == "" {
+		c.Proxmox.Bridge = d.Proxmox.Bridge
+	}
 	if c.GitHub.APIURL == "" {
 		c.GitHub.APIURL = d.GitHub.APIURL
 	}
 	// An empty runner pin follows the version baked into this build, so self-update also rolls the
 	// runner agent forward. Setting both fields in the file pins it explicitly.
+	c.GitHub.pinned = c.GitHub.RunnerVersion != "" && c.GitHub.RunnerVersion != d.GitHub.RunnerVersion ||
+		c.GitHub.pinned
 	if c.GitHub.RunnerVersion == "" {
 		c.GitHub.RunnerVersion, c.GitHub.RunnerSHA256 = d.GitHub.RunnerVersion, d.GitHub.RunnerSHA256
 	}
@@ -200,6 +251,21 @@ func (c *Config) applyDefaults() {
 	}
 	if c.Update.Repo == "" {
 		c.Update.Repo = d.Update.Repo
+	}
+	if c.Images.Repo == "" {
+		c.Images.Repo = c.Update.Repo
+	}
+	if c.Images.VMIDRange == [2]int{} {
+		c.Images.VMIDRange = d.Images.VMIDRange
+	}
+	if c.Images.CacheStorage == "" {
+		c.Images.CacheStorage = d.Images.CacheStorage
+	}
+	if c.Images.RootfsGB == 0 {
+		c.Images.RootfsGB = d.Images.RootfsGB
+	}
+	if c.Images.CheckInterval == 0 {
+		c.Images.CheckInterval = d.Images.CheckInterval
 	}
 	for i := range c.Targets {
 		if c.Targets[i].PrivateKeyFile == "" && c.Targets[i].Owner() != "" {
@@ -229,6 +295,10 @@ func (c *Config) applyDefaults() {
 		if p.Max == 0 {
 			p.Max = c.Proxmox.MaxRunners
 		}
+		// Always attach a NIC with the firewall flag so isolation holds whatever the template had.
+		if p.Bridge == "" {
+			p.Bridge = c.Proxmox.Bridge
+		}
 	}
 }
 
@@ -249,10 +319,17 @@ func (c *Config) migrate() (bool, error) {
 
 // Parse decodes, migrates, defaults and validates a config document.
 func Parse(data []byte) (*Config, bool, error) {
-	c := &Config{}
+	// Decoding over the defaults means a key left out of the file keeps its default, including
+	// booleans like update.enabled that applyDefaults can't tell apart from an explicit false.
+	c := Default()
+	c.Version = 0
 	dec := yaml.NewDecoder(strings.NewReader(string(data)))
-	if err := dec.Decode(c); err != nil {
+	// An empty file is a config with every default, which `config init` and setup then fill in.
+	if err := dec.Decode(c); err != nil && !errors.Is(err, io.EOF) {
 		return nil, false, fmt.Errorf("parse config: %w", err)
+	}
+	if strings.TrimSpace(string(data)) == "" {
+		c.Version = CurrentVersion
 	}
 	if len(c.Extra) > 0 {
 		keys := make([]string, 0, len(c.Extra))
@@ -294,9 +371,9 @@ func Load(path string) (*Config, error) {
 	return c, nil
 }
 
-// Save writes the config atomically with 0600 permissions.
+// Save writes the commented config file atomically with 0600 permissions.
 func (c *Config) Save(path string) error {
-	data, err := yaml.Marshal(c)
+	data, err := c.Render()
 	if err != nil {
 		return err
 	}
@@ -304,13 +381,18 @@ func (c *Config) Save(path string) error {
 		return err
 	}
 	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, append([]byte("# Written by pve-runners setup; safe to hand-edit.\n"), data...), 0o600); err != nil {
+	if err := os.WriteFile(tmp, data, 0o600); err != nil {
 		return err
 	}
 	return os.Rename(tmp, path)
 }
 
-var labelRe = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
+var (
+	labelRe = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
+	// Linux interface names: at most 15 characters.
+	bridgeRe = regexp.MustCompile(`^[A-Za-z0-9_.-]{1,15}$`)
+	imageRe  = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]*(@template-[a-z0-9._-]+)?$`)
+)
 
 // Validate returns every problem at once so `config validate` can show them together.
 func (c *Config) Validate() error {
@@ -323,6 +405,9 @@ func (c *Config) Validate() error {
 	lo, hi := c.Proxmox.VMIDRange[0], c.Proxmox.VMIDRange[1]
 	if lo < 100 || hi < lo {
 		add("proxmox.vmid_range must be [low, high] with 100 <= low <= high, got [%d, %d]", lo, hi)
+	}
+	if !bridgeRe.MatchString(c.Proxmox.Bridge) {
+		add("proxmox.bridge %q is not a valid bridge name", c.Proxmox.Bridge)
 	}
 	if c.Proxmox.MaxRunners < 1 || c.Proxmox.MaxRunners > hi-lo+1 {
 		add("proxmox.max_runners must be between 1 and the size of vmid_range (%d), got %d", hi-lo+1, c.Proxmox.MaxRunners)
@@ -343,6 +428,15 @@ func (c *Config) Validate() error {
 	if c.Images.RetentionDays < 1 {
 		add("images.retention_days must be at least 1, got %d", c.Images.RetentionDays)
 	}
+	ilo, ihi := c.Images.VMIDRange[0], c.Images.VMIDRange[1]
+	if ilo < 100 || ihi < ilo {
+		add("images.vmid_range must be [low, high] with 100 <= low <= high, got [%d, %d]", ilo, ihi)
+	} else if ilo <= hi && lo <= ihi {
+		add("images.vmid_range [%d, %d] overlaps proxmox.vmid_range [%d, %d]", ilo, ihi, lo, hi)
+	}
+	if c.Images.RootfsGB < 4 {
+		add("images.rootfs_gb must be at least 4, got %d", c.Images.RootfsGB)
+	}
 	if c.Update.Channel != "edge" && c.Update.Channel != "stable" {
 		add("update.channel must be edge or stable, got %q", c.Update.Channel)
 	}
@@ -361,10 +455,22 @@ func (c *Config) Validate() error {
 		default:
 			add("pools.%s.mode must be ephemeral or permanent", name)
 		}
-		if p.Template < 100 {
+		switch {
+		case (p.Template == 0) == (p.Image == ""):
+			add("pools.%s needs exactly one of image (a published template image) or template (a container ID)", name)
+		case p.Image != "":
+			if !imageRe.MatchString(p.Image) {
+				add("pools.%s.image %q must be a name like ubuntu-latest, optionally pinned as name@template-name-date-run", name, p.Image)
+			} else if p.DiskGB > 0 && p.DiskGB < c.Images.RootfsGB {
+				add("pools.%s.disk_gb (%d) is smaller than images.rootfs_gb (%d); Proxmox can't shrink disks", name, p.DiskGB, c.Images.RootfsGB)
+			}
+		case p.Template < 100:
 			add("pools.%s.template must be a guest ID (>= 100)", name)
-		} else if p.Template >= lo && p.Template <= hi {
+		case p.Template >= lo && p.Template <= hi:
 			add("pools.%s.template %d is inside vmid_range; templates must live outside it", name, p.Template)
+		}
+		if p.Bridge != "" && !bridgeRe.MatchString(p.Bridge) {
+			add("pools.%s.bridge %q is not a valid bridge name", name, p.Bridge)
 		}
 		if p.Min > p.Max {
 			add("pools.%s.min (%d) is larger than max (%d)", name, p.Min, p.Max)

@@ -124,3 +124,142 @@ func TestNewerVersionRefused(t *testing.T) {
 		t.Fatalf("got %v", err)
 	}
 }
+
+func TestImagePools(t *testing.T) {
+	c, _, err := Parse([]byte(strings.Replace(valid, "template: 8000", "image: ubuntu-latest", 1)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Images.Repo != c.Update.Repo || c.Images.VMIDRange != [2]int{8900, 8999} || c.Images.CacheStorage != "local" ||
+		c.Images.RootfsGB != 16 || c.Images.CheckInterval != 6*time.Hour || c.Pools["small"].Bridge != "vmbr0" || c.Proxmox.Bridge != "vmbr0" {
+		t.Fatalf("image defaults not applied: %+v %+v", c.Images, c.Pools["small"])
+	}
+	for doc, want := range map[string]string{
+		strings.Replace(valid, "template: 8000", "template: 8000\n    image: ubuntu-latest", 1): "exactly one of image",
+		strings.Replace(valid, "template: 8000", "disk_gb: 0", 1):                               "exactly one of image",
+		strings.Replace(valid, "template: 8000", "image: Ubuntu Latest", 1):                     "pools.small.image",
+		strings.Replace(valid, "template: 8000", "image: ubuntu-latest\n    disk_gb: 8", 1):     "smaller than images.rootfs_gb",
+		valid + "images: {vmid_range: [9400, 9600]}\n":                                          "overlaps proxmox.vmid_range",
+	} {
+		if _, _, err := Parse([]byte(doc)); err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("want %q, got %v", want, err)
+		}
+	}
+	if _, _, err := Parse([]byte(strings.Replace(valid, "template: 8000", "image: ubuntu-latest@template-ubuntu-latest-20261012-5", 1))); err != nil {
+		t.Fatalf("pinned image: %v", err)
+	}
+}
+
+func TestBridgeIsHostWideWithPoolOverride(t *testing.T) {
+	doc := strings.Replace(valid, "  node: pve1", "  node: pve1\n  bridge: vmbr4", 1) +
+		"  other:\n    template: 8001\n    bridge: vmbr7\n"
+	c, _, err := Parse([]byte(doc))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Pools["small"].Bridge != "vmbr4" || c.Pools["other"].Bridge != "vmbr7" {
+		t.Fatalf("bridges: small %q other %q", c.Pools["small"].Bridge, c.Pools["other"].Bridge)
+	}
+	if _, _, err := Parse([]byte(strings.Replace(valid, "  node: pve1", "  node: pve1\n  bridge: \"vmbr4; rm\"", 1))); err == nil ||
+		!strings.Contains(err.Error(), "proxmox.bridge") {
+		t.Fatalf("bad bridge accepted: %v", err)
+	}
+}
+
+func TestRenderRoundTripsAndDocumentsEverySetting(t *testing.T) {
+	c, _, err := Parse([]byte(valid + `
+  img:
+    image: ubuntu-latest@template-ubuntu-latest-20261012-5
+    labels: [proxmox-img]
+    max_lifetime: 6h
+    vlan: 50
+    full_clone: true
+    min: 1
+network:
+  allow: [{proto: udp, port: 53, dest: 192.0.2.1}]
+notify: {webhook_url_file: /etc/pve-runners/notify-url, format: ntfy}
+github: {runner_version: "9.9.9", runner_sha256: abc}
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.Targets = append(c.Targets, Target{User: "someone", AppID: 2, InstallationID: 3, Repos: []string{"side"}, Pools: []string{"img"}})
+	c.applyDefaults()
+	out, err := c.Render()
+	if err != nil {
+		t.Fatal(err)
+	}
+	back, _, err := Parse(out)
+	if err != nil {
+		t.Fatalf("rendered config does not parse: %v\n%s", err, out)
+	}
+	// Rendering covers every field, so equal renders mean nothing was lost.
+	again, _ := back.Render()
+	if string(again) != string(out) {
+		t.Fatalf("round trip changed the config:\n%s\n---\n%s", out, again)
+	}
+	img := back.Pools["img"]
+	if img.Image != "ubuntu-latest@template-ubuntu-latest-20261012-5" || img.MaxLifetime != 6*time.Hour || img.VLAN != 50 ||
+		!img.FullClone || img.Min != 1 || back.Notify.Format != "ntfy" || !back.GitHub.Pinned() ||
+		back.Network.Allow[0].Dest != "192.0.2.1" || back.Targets[1].Repos[0] != "side" {
+		t.Fatalf("values lost: %+v %+v", img, back)
+	}
+}
+
+func TestInitWritesCommentedDefaultsOnlyWhenEmpty(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte("\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if c, _, err := Parse([]byte("  \n")); err != nil || c.Proxmox.MaxRunners != 4 {
+		t.Fatalf("an empty file should parse as defaults: %v", err)
+	}
+	wrote, err := Init(path, "pve1")
+	if err != nil || !wrote {
+		t.Fatalf("empty file not filled: %v", err)
+	}
+	data, _ := os.ReadFile(path)
+	c, _, err := Parse(data)
+	if err != nil {
+		t.Fatalf("%v\n%s", err, data)
+	}
+	p := c.Pools["default"]
+	if c.Proxmox.Node != "pve1" || c.Proxmox.MaxRunners != 4 || c.Proxmox.Bridge != "vmbr0" || p.Image != "ubuntu-latest" ||
+		p.Labels[0] != "proxmox" || p.Mode != "ephemeral" || p.Cores != 4 || p.MemoryMB != 8192 || p.DiskGB != 40 ||
+		c.Images.RetentionDays != 30 || c.Update.Channel != "edge" || c.Notify.WebhookURLFile != "" || c.GitHub.Pinned() {
+		t.Fatalf("defaults: %+v %+v", c, p)
+	}
+	for _, key := range []string{"max_runners: 4", "bridge: vmbr0", "cores: 4", "memory_mb: 8192", "disk_gb: 40",
+		"retention_days: 30", "labels: [proxmox]", "mode: ephemeral", "proto: udp, port: 53", "# webhook_url_file:",
+		"channel: edge", "enabled: true", "# runner_version:", "# Most runners at once on this host", "# bridge: vmbr1"} {
+		if !strings.Contains(string(data), key) {
+			t.Errorf("missing %q", key)
+		}
+	}
+	if st, _ := os.Stat(path); st.Mode().Perm() != 0o600 {
+		t.Fatalf("mode %v", st.Mode())
+	}
+
+	// A non-empty file, even an edited one, is never overwritten.
+	_ = os.WriteFile(path, []byte("proxmox: {node: mine}\n"), 0o600)
+	if wrote, err := Init(path, "pve1"); err != nil || wrote {
+		t.Fatalf("overwrote an existing config: %v", err)
+	}
+	if b, _ := os.ReadFile(path); string(b) != "proxmox: {node: mine}\n" {
+		t.Fatalf("content changed: %q", b)
+	}
+}
+
+func TestPoolBridgeFollowsHostBridgeUnlessOverridden(t *testing.T) {
+	c := Initial("pve1")
+	out, _ := c.Render()
+	// Changing only proxmox.bridge in the written file must move the default pool too.
+	edited := strings.Replace(string(out), "  bridge: vmbr0\n", "  bridge: vmbr4\n", 1)
+	back, _, err := Parse([]byte(edited))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if back.Proxmox.Bridge != "vmbr4" || back.Pools["default"].Bridge != "vmbr4" {
+		t.Fatalf("host %q pool %q", back.Proxmox.Bridge, back.Pools["default"].Bridge)
+	}
+}
