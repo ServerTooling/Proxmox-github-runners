@@ -26,6 +26,7 @@ func TestCommandBuildersExactArgv(t *testing.T) {
 			"pct set 9001 --cores 1 --memory 512 --tags gh-runner --onboot 0 --description d --net0 name=eth0,bridge=vmbr1,ip=dhcp,firewall=1,tag=50"},
 		{pve.LXCSet(9001, pve.LXCSpec{Cores: 1, MemoryMB: 512, Nameservers: []string{"192.0.2.53", "198.51.100.53"}}),
 			"pct set 9001 --cores 1 --memory 512 --tags  --onboot 0 --nameserver 192.0.2.53 198.51.100.53"},
+		{pve.RunnerUnitStateCmd(9001), "pct exec 9001 -- systemctl is-active gh-runner.service"},
 		{pve.LXCStart(9001), "pct start 9001"},
 		{pve.LXCResize(9001, 40), "pct resize 9001 rootfs 40G"},
 		{pve.LXCStop(9001), "pct stop 9001"},

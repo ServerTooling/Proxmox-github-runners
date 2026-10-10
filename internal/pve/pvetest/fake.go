@@ -33,6 +33,9 @@ type Fake struct {
 	ResourcePools []string
 	// Storages is the node's storage list; New starts with local (no containers) and local-lvm.
 	Storages []pve.Storage
+	// UnitState maps a guest ID to what `systemctl is-active gh-runner.service` prints in it
+	// (default "active").
+	UnitState map[int]string
 	// Delay makes every command take this long, so concurrent callers interleave like on a real host.
 	Delay time.Duration
 }
@@ -56,6 +59,16 @@ func (f *Fake) Run(_ context.Context, name string, args ...string) ([]byte, erro
 		}
 	}
 	switch {
+	case name == "pct" && args[0] == "exec" && strings.HasSuffix(line, "-- systemctl is-active gh-runner.service"):
+		id, _ := strconv.Atoi(args[1])
+		state, ok := f.UnitState[id]
+		if !ok {
+			state = "active"
+		}
+		if state == "active" {
+			return []byte(state + "\n"), nil
+		}
+		return []byte(state + "\n"), fmt.Errorf("exit status 3")
 	case name == "pvesh" && args[0] == "get" && args[1] == "/cluster/firewall/options":
 		on := 0
 		if f.FirewallOn {

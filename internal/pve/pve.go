@@ -295,6 +295,21 @@ func (h *Host) Destroy(ctx context.Context, id int) error {
 	return nil // already gone
 }
 
+// RunnerUnitStateCmd asks systemd in a runner guest for the state of its one-job runner unit.
+func RunnerUnitStateCmd(id int) Cmd {
+	return LXCExec(id, "systemctl", "is-active", "gh-runner.service")
+}
+
+// RunnerUnitState returns the runner unit's state (active, activating, inactive, failed, ...).
+// systemctl exits non-zero for every state but active, so the printed state wins over the error.
+func (h *Host) RunnerUnitState(ctx context.Context, id int) (string, error) {
+	out, err := h.run(ctx, RunnerUnitStateCmd(id))
+	if state := strings.TrimSpace(string(out)); state != "" {
+		return state, nil
+	}
+	return "", err
+}
+
 // FreeMemoryMB reports the node's free memory, used to avoid starving the host.
 func (h *Host) FreeMemoryMB(ctx context.Context) (int, error) {
 	out, err := h.run(ctx, NodeStatusCmd(h.Node))

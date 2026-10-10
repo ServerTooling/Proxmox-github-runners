@@ -17,6 +17,10 @@ import (
 // the gap between clone and start.
 const Grace = 3 * time.Minute
 
+// StartGrace is how long a running ephemeral guest may go without its runner unit active before it
+// counts as dead. It covers boot, the wait for boot to settle, and pushing the config.
+const StartGrace = 10 * time.Minute
+
 type Action struct {
 	VMID   int
 	Reason string
@@ -46,9 +50,11 @@ func Once(ctx context.Context, cfg *config.Config, h *pve.Host, now time.Time) (
 	if err != nil {
 		return nil, err
 	}
+	actions := Plan(cfg, runners, now)
+	actions = append(actions, deadRunners(ctx, h, runners, actions, now)...)
 	var done []Action
 	var errs []error
-	for _, a := range Plan(cfg, runners, now) {
+	for _, a := range actions {
 		if err := h.Destroy(ctx, a.VMID); err != nil {
 			errs = append(errs, fmt.Errorf("destroy %d: %w", a.VMID, err))
 			continue
@@ -56,4 +62,31 @@ func Once(ctx context.Context, cfg *config.Config, h *pve.Host, now time.Time) (
 		done = append(done, a)
 	}
 	return done, errors.Join(errs...)
+}
+
+// deadRunners finds running ephemeral guests whose runner unit has ended without the guest powering
+// off: the unit stops the guest when the runner exits, but a guest that was started again (by hand,
+// or by a host restart) just sits there with nothing to run. Guests whose state can't be read are
+// left alone; the next pass tries again.
+func deadRunners(ctx context.Context, h *pve.Host, runners []pve.Guest, planned []Action, now time.Time) []Action {
+	skip := map[int]bool{}
+	for _, a := range planned {
+		skip[a.VMID] = true
+	}
+	var out []Action
+	for _, g := range runners {
+		created, _ := strconv.ParseInt(g.TagValue("created"), 10, 64)
+		if skip[g.VMID] || g.Status != "running" || g.TagValue("mode") != "ephemeral" ||
+			created == 0 || now.Sub(time.Unix(created, 0)) < StartGrace {
+			continue
+		}
+		state, err := h.RunnerUnitState(ctx, g.VMID)
+		if err != nil {
+			continue
+		}
+		if state == "inactive" || state == "failed" {
+			out = append(out, Action{g.VMID, "runner service " + state})
+		}
+	}
+	return out
 }
