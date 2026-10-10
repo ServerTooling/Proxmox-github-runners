@@ -75,10 +75,33 @@ each host's pools a different `scale_set` (or labels).
 | `pve-runners template prepare --ctid ID` | Make a custom runner template from a container you built |
 | `pve-runners config validate` | Check `/etc/pve-runners/config.yaml` |
 | `pve-runners update [--now]` | Check for, or install, a newer release |
+| `pve-runners logs ship` | Send new log lines to Loki now, to test `logs:` settings |
 
 Configuration reference: [packaging/config.example.yaml](packaging/config.example.yaml). The default
 runner is 4 cores, 8 GB RAM and a 40 GB disk, with at most 4 runners per host
 (`proxmox.max_runners`).
+
+## Logs
+
+The service logs to the journal (`journalctl -u pve-runners`). To read logs away from the host, set
+`logs:` to ship them to Grafana Loki (a free Grafana Cloud stack works): the service's own log and the
+`gh-runner` log inside each running runner, which is otherwise lost when the runner is destroyed. On
+Grafana Cloud, create an access policy token with `logs:write`, then:
+
+```bash
+install -m 600 /dev/stdin /etc/pve-runners/loki-token   # paste the token, then Ctrl-D
+```
+
+```yaml
+logs:
+  url: https://logs-prod-000.grafana.net   # your stack's Loki URL
+  user: "123456"                           # your stack's Loki user ID
+  token_file: /etc/pve-runners/loki-token
+```
+
+Run `pve-runners logs ship` to check it, then `systemctl reload pve-runners`. Lines are labelled
+`service="pve-runners"`, `host`, `unit` (`pve-runners` or `gh-runner`) and, for runners, `vmid`,
+`runner` and `pool`. Anything that looks like a token is masked before it leaves the host.
 
 ## Updates
 

@@ -36,6 +36,8 @@ type Fake struct {
 	// UnitState maps a guest ID to what `systemctl is-active gh-runner.service` prints in it
 	// (default "active").
 	UnitState map[int]string
+	// Outputs maps a full command line to what it prints, for read-only commands like journalctl.
+	Outputs map[string]string
 	// Delay makes every command take this long, so concurrent callers interleave like on a real host.
 	Delay time.Duration
 }
@@ -57,6 +59,9 @@ func (f *Fake) Run(_ context.Context, name string, args ...string) ([]byte, erro
 		if strings.HasPrefix(line, prefix) {
 			return nil, err
 		}
+	}
+	if out, ok := f.Outputs[line]; ok {
+		return []byte(out), nil
 	}
 	switch {
 	case name == "pct" && args[0] == "exec" && strings.HasSuffix(line, "-- systemctl is-active gh-runner.service"):

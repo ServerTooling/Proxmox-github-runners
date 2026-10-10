@@ -38,8 +38,9 @@ func TestParseAppliesDefaults(t *testing.T) {
 	if c.HostID != "pve1" {
 		t.Fatalf("host_id should default to the node name, got %q", c.HostID)
 	}
-	if c.Proxmox.VMIDRange != [2]int{9000, 9499} || c.Update.Channel != "edge" || c.Update.Interval != 15*time.Minute || c.Images.RetentionDays != 30 {
-		t.Fatalf("defaults not applied: %+v %+v", c.Proxmox, c.Update)
+	if c.Proxmox.VMIDRange != [2]int{9000, 9499} || c.Update.Channel != "edge" || c.Update.Interval != 15*time.Minute || c.Images.RetentionDays != 30 ||
+		c.Logs.On() || c.Logs.Interval != 15*time.Second {
+		t.Fatalf("defaults not applied: %+v %+v %+v", c.Proxmox, c.Update, c.Logs)
 	}
 }
 
@@ -49,6 +50,7 @@ proxmox: {vmid_range: [9000, 9499], max_runners: -1}
 update: {channel: nightly}
 images: {retention_days: -5}
 network: {dns: [not-an-ip]}
+logs: {url: "ftp://x", interval: 1s}
 targets:
   - org: a
     user: b
@@ -70,7 +72,7 @@ pools:
 	}
 	for _, want := range []string{
 		"update.channel", "max_runners", "retention_days", "exactly one of org or user", "no installation_id", "no app_id", "unknown pool \"missing\"",
-		"personal account", "pool name \"bad name\"", "mode must be", "inside vmid_range", "min (5)", "invalid label", "network.dns[0]",
+		"personal account", "pool name \"bad name\"", "mode must be", "inside vmid_range", "min (5)", "invalid label", "network.dns[0]", "logs.url \"ftp://x\"", "logs.token_file is not", "logs.interval",
 	} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("missing %q in:\n%v", want, err)
@@ -182,6 +184,7 @@ network:
   allow: [{proto: udp, port: 53, dest: 192.0.2.1}]
   dns: [192.0.2.53, "2001:db8::53"]
 notify: {webhook_url_file: /etc/pve-runners/notify-url, format: ntfy}
+logs: {url: "https://logs.example.com", user: "123", token_file: /etc/pve-runners/loki-token, interval: 30s}
 github: {runner_version: "9.9.9", runner_sha256: abc}
 `))
 	if err != nil {
@@ -205,7 +208,9 @@ github: {runner_version: "9.9.9", runner_sha256: abc}
 	img := back.Pools["img"]
 	if img.Image != "ubuntu-latest@template-ubuntu-latest-20261012-5" || img.MaxLifetime != 6*time.Hour || img.VLAN != 50 ||
 		!img.FullClone || img.Min != 1 || img.ScaleSetName() != "pve-img" || back.Autoscale.Enabled || back.Notify.Format != "ntfy" || !back.GitHub.Pinned() ||
-		back.Network.Allow[0].Dest != "192.0.2.1" || len(back.Network.DNS) != 2 || back.Network.DNS[1] != "2001:db8::53" || back.Targets[1].Repos[0] != "side" {
+		back.Network.Allow[0].Dest != "192.0.2.1" || len(back.Network.DNS) != 2 || back.Network.DNS[1] != "2001:db8::53" || back.Targets[1].Repos[0] != "side" ||
+		!back.Logs.On() || back.Logs.URL != "https://logs.example.com" || back.Logs.User != "123" ||
+		back.Logs.Interval != 30*time.Second {
 		t.Fatalf("values lost: %+v %+v", img, back)
 	}
 }
@@ -235,7 +240,7 @@ func TestInitWritesCommentedDefaultsOnlyWhenEmpty(t *testing.T) {
 	}
 	for _, key := range []string{"max_runners: 4", "bridge: vmbr0", "cores: 4", "memory_mb: 8192", "disk_gb: 40",
 		"retention_days: 30", "labels: [proxmox]", "mode: ephemeral", "proto: udp, port: 53", "# webhook_url_file:",
-		"channel: edge", "enabled: true", "# runner_version:", "# Most runners at once on this host", "# bridge: vmbr1"} {
+		"channel: edge", "enabled: true", "# runner_version:", "# token_file: /etc/pve-runners/loki-token", "# Most runners at once on this host", "# bridge: vmbr1"} {
 		if !strings.Contains(string(data), key) {
 			t.Errorf("missing %q", key)
 		}

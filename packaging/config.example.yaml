@@ -62,6 +62,12 @@ images:
 notify:
   # webhook_url_file: /etc/pve-runners/notify-url   # ntfy, Discord or Slack URL; off by default
 
+logs:                              # ship the service and runner logs to Grafana Loki; off by default
+  # url: https://logs-prod-000.grafana.net
+  # user: "123456"                 # Grafana Cloud Loki user ID (basic auth); omit for a bearer token
+  # token_file: /etc/pve-runners/loki-token   # 0600; Grafana Cloud: access policy token with logs:write
+  interval: 15s
+
 update:
   enabled: true
   channel: edge                    # edge = every build from main | stable = v* tags only

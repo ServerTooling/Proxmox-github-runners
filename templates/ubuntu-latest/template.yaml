@@ -13,6 +13,7 @@ roles:
   - helm
   - kubectl
   - docker
+  - playwright_deps   # libraries Playwright's Chromium and Firefox need; runners have no sudo
   - actions_runner    # pinned by packaging/runner-version; the one-job runner service
 
 # Tool versions: "latest"/"lts"/"stable" resolve at build time (recorded in the release's
@@ -34,5 +35,6 @@ smoke:
   helm: [helm version --short]
   kubectl: [kubectl version --client]
   docker: [docker --version]
+  playwright_deps: ["dpkg-query -W xvfb libnss3 libgtk-3-0t64 libavcodec60 >/dev/null && echo installed"]
   # As the runner user, like gh-runner.service runs it, so files only root can write fail the build.
   actions_runner: ["su -s /bin/sh runner -c '/opt/actions-runner/bin/Runner.Listener --version'", systemctl is-enabled gh-runner.service]
