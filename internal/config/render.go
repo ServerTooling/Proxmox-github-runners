@@ -95,6 +95,12 @@ network:
 {{- range .Network.Allow}}
     - {proto: {{.Proto}}, port: {{.Port}}{{if .Dest}}, dest: {{q .Dest}}{{end}}}
 {{- end}}
+  # DNS servers for runners, e.g. [1.1.1.1, 9.9.9.9]. Empty copies the host's, which only works when
+  # they answer from the runner bridge.
+  dns:{{if not .Network.DNS}} []{{end}}
+{{- range .Network.DNS}}
+    - {{q .}}
+{{- end}}
 
 # One entry per org (or personal account), each with its own private GitHub App. "pve-runners setup"
 # adds these; only private repositories are ever served.

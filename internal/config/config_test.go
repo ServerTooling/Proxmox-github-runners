@@ -48,6 +48,7 @@ func TestValidateReportsAllProblems(t *testing.T) {
 proxmox: {vmid_range: [9000, 9499], max_runners: -1}
 update: {channel: nightly}
 images: {retention_days: -5}
+network: {dns: [not-an-ip]}
 targets:
   - org: a
     user: b
@@ -69,7 +70,7 @@ pools:
 	}
 	for _, want := range []string{
 		"update.channel", "max_runners", "retention_days", "exactly one of org or user", "no installation_id", "no app_id", "unknown pool \"missing\"",
-		"personal account", "pool name \"bad name\"", "mode must be", "inside vmid_range", "min (5)", "invalid label",
+		"personal account", "pool name \"bad name\"", "mode must be", "inside vmid_range", "min (5)", "invalid label", "network.dns[0]",
 	} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("missing %q in:\n%v", want, err)
@@ -179,6 +180,7 @@ func TestRenderRoundTripsAndDocumentsEverySetting(t *testing.T) {
 autoscale: {enabled: false}
 network:
   allow: [{proto: udp, port: 53, dest: 192.0.2.1}]
+  dns: [192.0.2.53, "2001:db8::53"]
 notify: {webhook_url_file: /etc/pve-runners/notify-url, format: ntfy}
 github: {runner_version: "9.9.9", runner_sha256: abc}
 `))
@@ -203,7 +205,7 @@ github: {runner_version: "9.9.9", runner_sha256: abc}
 	img := back.Pools["img"]
 	if img.Image != "ubuntu-latest@template-ubuntu-latest-20261012-5" || img.MaxLifetime != 6*time.Hour || img.VLAN != 50 ||
 		!img.FullClone || img.Min != 1 || img.ScaleSetName() != "pve-img" || back.Autoscale.Enabled || back.Notify.Format != "ntfy" || !back.GitHub.Pinned() ||
-		back.Network.Allow[0].Dest != "192.0.2.1" || back.Targets[1].Repos[0] != "side" {
+		back.Network.Allow[0].Dest != "192.0.2.1" || len(back.Network.DNS) != 2 || back.Network.DNS[1] != "2001:db8::53" || back.Targets[1].Repos[0] != "side" {
 		t.Fatalf("values lost: %+v %+v", img, back)
 	}
 }

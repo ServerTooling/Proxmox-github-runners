@@ -290,3 +290,16 @@ func TestSpawnCreatesMissingResourcePool(t *testing.T) {
 		t.Fatalf("commands: %q", m)
 	}
 }
+
+func TestSpawnSetsConfiguredDNS(t *testing.T) {
+	p, f, gh := setup(t)
+	gh.RunnerGroups["Example-Org"] = gh.RunnerGroups["example-org"]
+	p.Cfg.Network.Isolate = new(bool)
+	p.Cfg.Network.DNS = []string{"192.0.2.53", "198.51.100.53"}
+	if _, err := p.Spawn(context.Background(), Request{Pool: "small", Target: org}); err != nil {
+		t.Fatal(err)
+	}
+	if set := f.Mutations()[1]; !strings.HasSuffix(set, " --nameserver 192.0.2.53 198.51.100.53") {
+		t.Errorf("set: %q", set)
+	}
+}
