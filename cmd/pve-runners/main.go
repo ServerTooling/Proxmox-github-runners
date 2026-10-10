@@ -364,7 +364,16 @@ func nodeCert() (tls.Certificate, error) {
 func restartSoon() {
 	go func() {
 		time.Sleep(time.Second)
-		if out, err := exec.Command("systemctl", "restart", "--no-block", "pve-runners.service").CombinedOutput(); err != nil {
+		out, err := exec.Command("systemctl", "restart", "--no-block", "pve-runners.service").CombinedOutput()
+		// The restart stops this service's whole cgroup, systemctl included, often before it exits; being
+		// terminated that way means the restart is underway, not that it failed.
+		var ee *exec.ExitError
+		if errors.As(err, &ee) {
+			if ws, ok := ee.Sys().(syscall.WaitStatus); ok && ws.Signaled() && ws.Signal() == syscall.SIGTERM {
+				return
+			}
+		}
+		if err != nil {
 			slog.Error("restart after saving settings", "err", err, "output", strings.TrimSpace(string(out)))
 		}
 	}()
