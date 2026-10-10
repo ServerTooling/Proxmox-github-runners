@@ -92,7 +92,7 @@ type Server struct {
 	mu       sync.Mutex
 	apps     map[string]*appState // by owner (lowercase)
 	errMsg   string
-	sessions map[string]time.Time  // settings page logins: session ID -> expiry
+	sessions map[string]time.Time  // settings page logins: SHA-256 of session ID -> expiry
 	runs     map[string]*actionRun // latest run of each settings page action
 }
 
