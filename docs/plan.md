@@ -134,7 +134,7 @@ vars:                         # "latest"/"lts"/"stable" resolve at build time, o
 smoke:                        # per role; every command must pass before the image is published
   go: [go version]
   node: [node --version, npm --version]
-  actions_runner: [/opt/actions-runner/bin/Runner.Listener --version, systemctl is-enabled gh-runner.service]
+  actions_runner: ["su -s /bin/sh runner -c '/opt/actions-runner/bin/Runner.Listener --version'", systemctl is-enabled gh-runner.service]
 ```
 Every download in the roles is checked against its publisher's checksum, and the resolved versions are recorded in the release's `<name>-<arch>.json`.
 Adding a tool is a new role (or a version bump) in a PR: reviewable, repeatable, like Ansible because it *is* Ansible.

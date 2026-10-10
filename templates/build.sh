@@ -68,7 +68,7 @@ for role, cmds in yaml.safe_load(open(sys.argv[1]))["smoke"].items():
 
 # Cleanup runs here rather than as a role because Ansible executes out of /tmp and /root/.ansible.
 docker exec "$ctr" sh -c 'apt-get clean
-  rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/* /root/.cache /root/.ansible /root/.npm
+  rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/* /root/.cache /root/.ansible /root/.npm /opt/actions-runner/_diag
   find /var/log -type f -exec truncate -s 0 {} +
   rm -f /.dockerenv'
 docker stop -t 1 "$ctr" >/dev/null

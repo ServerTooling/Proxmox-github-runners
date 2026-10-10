@@ -34,4 +34,5 @@ smoke:
   helm: [helm version --short]
   kubectl: [kubectl version --client]
   docker: [docker --version]
-  actions_runner: [/opt/actions-runner/bin/Runner.Listener --version, systemctl is-enabled gh-runner.service]
+  # As the runner user, like gh-runner.service runs it, so files only root can write fail the build.
+  actions_runner: ["su -s /bin/sh runner -c '/opt/actions-runner/bin/Runner.Listener --version'", systemctl is-enabled gh-runner.service]
