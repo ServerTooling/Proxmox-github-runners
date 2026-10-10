@@ -205,3 +205,20 @@ func (h *Host) CloseSetupPort(ctx context.Context) error {
 	}
 	return nil
 }
+
+// HostInputBlocked reports whether the datacenter firewall is on with an inbound policy that drops
+// connections to the host (Proxmox's default is DROP), which blocks the setup page.
+func (h *Host) HostInputBlocked(ctx context.Context) (bool, error) {
+	out, err := h.run(ctx, ClusterFirewallOptionsCmd())
+	if err != nil {
+		return false, err
+	}
+	var o struct {
+		Enable   int    `json:"enable"`
+		PolicyIn string `json:"policy_in"`
+	}
+	if err := json.Unmarshal(out, &o); err != nil {
+		return false, fmt.Errorf("parse firewall options: %w", err)
+	}
+	return o.Enable == 1 && o.PolicyIn != "ACCEPT", nil
+}

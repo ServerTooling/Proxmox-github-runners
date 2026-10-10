@@ -160,3 +160,18 @@ func TestSetupPortRuleIsAddedAndOnlyItsOwnRemoved(t *testing.T) {
 		t.Fatalf("commands %q, rules left %v", m, f.NodeRules)
 	}
 }
+
+func TestHostInputBlocked(t *testing.T) {
+	for _, c := range []struct {
+		on     bool
+		policy string
+		want   bool
+	}{{true, "", true}, {true, "DROP", true}, {true, "ACCEPT", false}, {false, "DROP", false}} {
+		f := pvetest.New()
+		f.FirewallOn, f.PolicyIn = c.on, c.policy
+		got, err := (&pve.Host{R: f}).HostInputBlocked(context.Background())
+		if err != nil || got != c.want {
+			t.Errorf("on=%v policy=%q: got %v %v", c.on, c.policy, got, err)
+		}
+	}
+}

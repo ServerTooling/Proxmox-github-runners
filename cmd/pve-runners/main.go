@@ -376,7 +376,7 @@ func cmdSetup(ctx context.Context, cfgPath, listen string, openFirewall bool) er
 	port := addr.Port
 
 	h := host(cfg)
-	firewallOn, _ := h.ClusterFirewallEnabled(ctx)
+	inputBlocked, _ := h.HostInputBlocked(ctx)
 	if openFirewall {
 		// Clear a rule left by a run that was killed, then open the port for this run only.
 		_ = h.CloseSetupPort(ctx)
@@ -413,8 +413,8 @@ func cmdSetup(ctx context.Context, cfgPath, listen string, openFirewall bool) er
 	switch {
 	case openFirewall:
 		fmt.Printf("Port %d is allowed through the Proxmox firewall until setup ends.\n", port)
-	case firewallOn:
-		fmt.Printf("The Proxmox firewall is on, so port %d is probably blocked and the page won't load. Either:\n", port)
+	case inputBlocked:
+		fmt.Printf("The Proxmox firewall drops inbound connections (input policy DROP), so port %d is blocked. Either:\n", port)
 		fmt.Printf("  - stop this (Ctrl+C) and run: pve-runners setup --open-firewall   (allows the port until setup ends), or\n")
 		fmt.Printf("  - from your computer run: ssh -L %d:127.0.0.1:%d root@%s   then open %s\n", port, port, ips[0], link("127.0.0.1"))
 	}

@@ -23,7 +23,9 @@ type Fake struct {
 	ReadSrc func(path string) (string, error)
 	// FirewallOn is the datacenter firewall switch; Group is the egress group's rules (nil = no group).
 	FirewallOn bool
-	Group      []map[string]any
+	// PolicyIn is the datacenter input policy ("" reports nothing, like an unset default of DROP).
+	PolicyIn string
+	Group    []map[string]any
 	// NodeRules are the host firewall rules (pos, comment, dport).
 	NodeRules []map[string]any
 }
@@ -47,6 +49,9 @@ func (f *Fake) Run(_ context.Context, name string, args ...string) ([]byte, erro
 		on := 0
 		if f.FirewallOn {
 			on = 1
+		}
+		if f.PolicyIn != "" {
+			return []byte(fmt.Sprintf(`{"enable":%d,"policy_in":%q}`, on, f.PolicyIn)), nil
 		}
 		return []byte(fmt.Sprintf(`{"enable":%d}`, on)), nil
 	case name == "pvesh" && args[0] == "get" && strings.HasPrefix(args[1], "/cluster/firewall/groups/"):
