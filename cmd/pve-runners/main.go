@@ -299,8 +299,9 @@ func webActions(cfgPath string, imageBusy *atomic.Bool) []setup.Action {
 			if err != nil {
 				return err
 			}
-			if install && (updater(cfg).Pending() || imageBusy.Load()) {
-				return errors.New("an update is still being verified or an image sync is running; try again later")
+			// Same guards as the automatic update: a restart mid-spawn would strand a half-made runner.
+			if install && (updater(cfg).Pending() || imageBusy.Load() || provision.Busy()) {
+				return errors.New("a runner is starting, an image sync is running, or an update is still being verified; try again shortly")
 			}
 			return cmdUpdate(ctx, w, cfg, install)
 		}
