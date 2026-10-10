@@ -3,9 +3,11 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -47,7 +49,8 @@ Usage:
   pve-runners setup [--listen :8765] [--open-firewall]
                                               first-run setup page (GitHub Apps, orgs, template);
                                               --open-firewall allows the port until setup ends
-  pve-runners run                             the service: autoscaling, reconcile, image and self-update loops
+  pve-runners run                             the service: autoscaling, reconcile, image and self-update loops,
+                                              and the settings page (https://<host>:8765, Proxmox login)
   pve-runners spawn --pool NAME --owner ORG [--repo NAME]
                                               create one ephemeral runner now
   pve-runners reconcile                       destroy finished or expired runners once
@@ -106,25 +109,17 @@ func run(args []string) error {
 		if err := fs.Parse(rest); err != nil {
 			return err
 		}
-		return cmdSpawn(ctx, *cfgPath, *pool, *owner, *repo)
+		return cmdSpawn(ctx, os.Stdout, *cfgPath, *pool, *owner, *repo)
 	case "reconcile":
 		if err := fs.Parse(rest); err != nil {
 			return err
 		}
-		cfg, err := config.Load(*cfgPath)
-		if err != nil {
-			return err
-		}
-		done, err := reconcile.Once(ctx, cfg, host(cfg), time.Now())
-		for _, a := range done {
-			fmt.Printf("destroyed %d: %s\n", a.VMID, a.Reason)
-		}
-		return err
+		return cmdReconcile(ctx, os.Stdout, *cfgPath)
 	case "status":
 		if err := fs.Parse(rest); err != nil {
 			return err
 		}
-		return cmdStatus(ctx, *cfgPath)
+		return cmdStatus(ctx, os.Stdout, *cfgPath)
 	case "template":
 		if len(rest) == 0 || rest[0] != "prepare" {
 			return errors.New("usage: pve-runners template prepare --ctid ID")
@@ -133,7 +128,7 @@ func run(args []string) error {
 		if err := fs.Parse(rest[1:]); err != nil {
 			return err
 		}
-		return cmdTemplatePrepare(ctx, *cfgPath, *ctid)
+		return cmdTemplatePrepare(ctx, os.Stdout, *cfgPath, *ctid)
 	case "images":
 		if len(rest) == 0 {
 			return errors.New("usage: pve-runners images list|pull|prune")
@@ -141,7 +136,7 @@ func run(args []string) error {
 		if err := fs.Parse(rest[1:]); err != nil {
 			return err
 		}
-		return cmdImages(ctx, *cfgPath, rest[0])
+		return cmdImages(ctx, os.Stdout, *cfgPath, rest[0])
 	case "logs":
 		if len(rest) == 0 || rest[0] != "ship" {
 			return errors.New("usage: pve-runners logs ship")
@@ -149,22 +144,7 @@ func run(args []string) error {
 		if err := fs.Parse(rest[1:]); err != nil {
 			return err
 		}
-		cfg, err := config.Load(*cfgPath)
-		if err != nil {
-			return err
-		}
-		sh, err := logShipper(cfg)
-		if err != nil {
-			return err
-		}
-		if sh == nil {
-			return errors.New("logs.url and logs.token_file are not set in the config")
-		}
-		if err := sh.Once(ctx); err != nil {
-			return err
-		}
-		fmt.Println("logs shipped to", cfg.Logs.URL)
-		return nil
+		return cmdLogsShip(ctx, os.Stdout, *cfgPath)
 	case "config":
 		if len(rest) == 0 {
 			return errors.New("usage: pve-runners config init|validate|show")
@@ -181,20 +161,7 @@ func run(args []string) error {
 			}
 			return err
 		}
-		data, err := os.ReadFile(*cfgPath)
-		if err != nil {
-			return err
-		}
-		cfg, _, err := config.Parse(data)
-		if err != nil {
-			return err
-		}
-		if rest[0] == "show" {
-			os.Stdout.Write(data)
-			return nil
-		}
-		fmt.Printf("%s is valid: %d targets, %d pools\n", *cfgPath, len(cfg.Targets), len(cfg.Pools))
-		return nil
+		return cmdConfig(os.Stdout, *cfgPath, rest[0] == "show")
 	case "update":
 		now := fs.Bool("now", false, "install a newer release if there is one")
 		if len(rest) > 0 && rest[0] == "verify" {
@@ -210,7 +177,7 @@ func run(args []string) error {
 			return err
 		}
 		cfg, _ := config.Load(*cfgPath)
-		return cmdUpdate(ctx, cfg, *now)
+		return cmdUpdate(ctx, os.Stdout, cfg, *now)
 	}
 	fmt.Print(usage)
 	return fmt.Errorf("unknown command %q", cmd)
@@ -264,6 +231,143 @@ func logShipper(cfg *config.Config) (*logship.Shipper, error) {
 	}
 	return &logship.Shipper{Host: host(cfg), URL: cfg.Logs.URL, User: cfg.Logs.User, Token: strings.TrimSpace(string(b)),
 		HostID: cfg.HostID, HTTP: &http.Client{Timeout: 30 * time.Second}, Now: time.Now}, nil
+}
+
+// startWeb serves the settings page until ctx ends or the returned stop is called. It needs the
+// Proxmox node certificate: to serve HTTPS, and to trust the local Proxmox API that checks logins.
+func startWeb(ctx context.Context, cfg *config.Config, cfgPath string, imageBusy *atomic.Bool) (stop func()) {
+	if !cfg.Web.On() {
+		return func() {}
+	}
+	cert, err := nodeCert()
+	if err != nil {
+		slog.Error("settings page off", "err", err)
+		return func() {}
+	}
+	s, err := setup.NewServer(cfg, cfgPath)
+	if err != nil {
+		slog.Error("settings page off", "err", err)
+		return func() {}
+	}
+	s.Service = &setup.Service{Login: setup.PVELogin("https://127.0.0.1:8006", setup.PinnedClient(cert.Certificate[0])),
+		SecretDir: config.DefaultDir, FailDelay: 2 * time.Second, Saved: restartSoon, Ctx: ctx,
+		Status:  func(ctx context.Context, w io.Writer) error { return cmdStatus(ctx, w, cfgPath) },
+		Actions: webActions(cfgPath, imageBusy)}
+	srv := &http.Server{Addr: cfg.Web.Listen, Handler: s.Handler(), ReadHeaderTimeout: 10 * time.Second,
+		TLSConfig: &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12}}
+	go func() {
+		if err := srv.ListenAndServeTLS("", ""); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			slog.Error("settings page", "err", err)
+		}
+	}()
+	_, port, _ := net.SplitHostPort(cfg.Web.Listen)
+	slog.Info("settings page", "url", "https://"+net.JoinHostPort(firstOr(preferredIPs(), nodeName()), port))
+	if blocked, _ := host(cfg).HostInputBlocked(ctx); blocked {
+		slog.Warn("the Proxmox firewall drops inbound connections; allow port " + port + " on this host to reach the settings page")
+	}
+	// stop waits for the listener to close, so a reload can bind the same port again right away.
+	done, closed := make(chan struct{}), make(chan struct{})
+	go func() {
+		select {
+		case <-ctx.Done():
+		case <-done:
+		}
+		_ = srv.Close()
+		close(closed)
+	}()
+	return func() { close(done); <-closed }
+}
+
+// webActions are the CLI commands offered as buttons on the settings page. Each loads the config from
+// disk like its command does, so it acts on what was last saved. Image work and updates share the run
+// loop's guard: two syncs would download the same image twice, and an update restarts the service.
+func webActions(cfgPath string, imageBusy *atomic.Bool) []setup.Action {
+	images := func(sub string) func(ctx context.Context, w io.Writer, _ map[string]string) error {
+		return func(ctx context.Context, w io.Writer, _ map[string]string) error {
+			if sub != "list" {
+				if !imageBusy.CompareAndSwap(false, true) {
+					return errors.New("an image sync is already running; try again when it ends")
+				}
+				defer imageBusy.Store(false)
+			}
+			return cmdImages(ctx, w, cfgPath, sub)
+		}
+	}
+	update := func(install bool) func(ctx context.Context, w io.Writer, _ map[string]string) error {
+		return func(ctx context.Context, w io.Writer, _ map[string]string) error {
+			cfg, err := config.Load(cfgPath)
+			if err != nil {
+				return err
+			}
+			if install && (updater(cfg).Pending() || imageBusy.Load()) {
+				return errors.New("an update is still being verified or an image sync is running; try again later")
+			}
+			return cmdUpdate(ctx, w, cfg, install)
+		}
+	}
+	return []setup.Action{
+		{Name: "reconcile", Label: "Clean up runners now", Help: "Destroy finished or expired runners (pve-runners reconcile).",
+			Run: func(ctx context.Context, w io.Writer, _ map[string]string) error {
+				return cmdReconcile(ctx, w, cfgPath)
+			}},
+		{Name: "spawn", Label: "Start a runner", Help: "One ephemeral runner now; repo is only for personal accounts.",
+			Args: []string{"pool", "owner", "repo"},
+			Run: func(ctx context.Context, w io.Writer, a map[string]string) error {
+				pool := a["pool"]
+				if pool == "" {
+					pool = "default"
+				}
+				return cmdSpawn(ctx, w, cfgPath, pool, a["owner"], a["repo"])
+			}},
+		{Name: "images-list", Label: "List images", Help: "Runner image templates on this host.", Run: images("list")},
+		{Name: "images-pull", Label: "Pull latest images", Help: "Fetch every pool's newest image now.",
+			Run: images("pull")},
+		{Name: "images-prune", Label: "Prune old images", Help: "Age out templates and downloads no pool uses.",
+			Confirm: "Delete old image templates and downloads?", Run: images("prune")},
+		{Name: "update-check", Label: "Check for updates", Run: update(false)},
+		{Name: "update-now", Label: "Update now", Help: "Installs the newest release and restarts the service.",
+			Confirm: "Install the update and restart pve-runners?", Run: update(true)},
+		{Name: "logs-ship", Label: "Ship logs now", Help: "Send new log lines to Loki.",
+			Run: func(ctx context.Context, w io.Writer, _ map[string]string) error { return cmdLogsShip(ctx, w, cfgPath) }},
+		{Name: "config-show", Label: "Show config file", Help: "The file as saved; secrets are never in it.",
+			Run: func(_ context.Context, w io.Writer, _ map[string]string) error { return cmdConfig(w, cfgPath, true) }},
+		{Name: "template-prepare", Label: "Prepare a template", Help: "Install the runner into a container and make it a template.",
+			Args: []string{"ctid"}, Confirm: "Turn this container into a runner template?",
+			Run: func(ctx context.Context, w io.Writer, a map[string]string) error {
+				id, err := strconv.Atoi(a["ctid"])
+				if err != nil {
+					return fmt.Errorf("ctid %q is not a container ID", a["ctid"])
+				}
+				return cmdTemplatePrepare(ctx, w, cfgPath, id)
+			}},
+	}
+}
+
+func firstOr(xs []string, def string) string {
+	if len(xs) > 0 {
+		return xs[0]
+	}
+	return def
+}
+
+// nodeCert is the certificate the Proxmox UI serves: a custom or ACME one when set, else the node's own.
+func nodeCert() (tls.Certificate, error) {
+	for _, base := range []string{"/etc/pve/local/pveproxy-ssl", "/etc/pve/local/pve-ssl"} {
+		if c, err := tls.LoadX509KeyPair(base+".pem", base+".key"); err == nil {
+			return c, nil
+		}
+	}
+	return tls.Certificate{}, errors.New("no Proxmox node certificate in /etc/pve/local")
+}
+
+// restartSoon restarts the service after a save, once the "saved" page has reached the browser.
+func restartSoon() {
+	go func() {
+		time.Sleep(time.Second)
+		if out, err := exec.Command("systemctl", "restart", "--no-block", "pve-runners.service").CombinedOutput(); err != nil {
+			slog.Error("restart after saving settings", "err", err, "output", strings.TrimSpace(string(out)))
+		}
+	}()
 }
 
 // appClient builds the App client for a target from its own key file.
@@ -344,7 +448,7 @@ func provisioner(ctx context.Context, cfg *config.Config) (*provision.Provisione
 
 // syncImages makes sure every pool's image has a template (pull), then ages out old templates and
 // archives (prune).
-func syncImages(ctx context.Context, cfg *config.Config, m *images.Manager, pull, prune bool) error {
+func syncImages(ctx context.Context, w io.Writer, cfg *config.Config, m *images.Manager, pull, prune bool) error {
 	var errs []error
 	refs := imageRefs(cfg)
 	for _, r := range refs {
@@ -357,6 +461,7 @@ func syncImages(ctx context.Context, cfg *config.Config, m *images.Manager, pull
 			continue
 		}
 		slog.Info("image ready", "image", r.String(), "template", id)
+		fmt.Fprintf(w, "image %s ready as template %d\n", r, id)
 	}
 	if !prune {
 		return errors.Join(errs...)
@@ -368,11 +473,12 @@ func syncImages(ctx context.Context, cfg *config.Config, m *images.Manager, pull
 	removed, err := m.Prune(ctx, refs, images.InUse(runners))
 	for _, r := range removed {
 		slog.Info("image pruned", "what", r.What, "reason", r.Reason)
+		fmt.Fprintf(w, "pruned %s (%s)\n", r.What, r.Reason)
 	}
 	return errors.Join(append(errs, err)...)
 }
 
-func cmdImages(ctx context.Context, cfgPath, sub string) error {
+func cmdImages(ctx context.Context, out io.Writer, cfgPath, sub string) error {
 	cfg, err := config.Load(cfgPath)
 	if err != nil {
 		return err
@@ -388,7 +494,7 @@ func cmdImages(ctx context.Context, cfgPath, sub string) error {
 			return err
 		}
 		sort.Slice(tpls, func(i, j int) bool { return tpls[i].VMID < tpls[j].VMID })
-		w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
+		w := tabwriter.NewWriter(out, 0, 4, 2, ' ', 0)
 		fmt.Fprintln(w, "ID\tIMAGE\tRELEASE\tCREATED")
 		for _, g := range tpls {
 			when := "incomplete"
@@ -400,7 +506,7 @@ func cmdImages(ctx context.Context, cfgPath, sub string) error {
 		}
 		return w.Flush()
 	case "pull", "prune":
-		return syncImages(ctx, cfg, m, sub == "pull", sub == "prune")
+		return syncImages(ctx, out, cfg, m, sub == "pull", sub == "prune")
 	}
 	return fmt.Errorf("unknown images command %q; use list, pull or prune", sub)
 }
@@ -433,6 +539,9 @@ func cmdSetup(ctx context.Context, cfgPath, listen string, openFirewall bool) er
 		}
 	}
 	ln, err := net.Listen("tcp", listen)
+	if errors.Is(err, syscall.EADDRINUSE) && cfg.Web.On() {
+		return fmt.Errorf("%w: the service already serves its settings page there; open https://<this host>%s and log in with your Proxmox account", err, listen)
+	}
 	if err != nil {
 		return err
 	}
@@ -541,7 +650,59 @@ func findTarget(cfg *config.Config, owner string) (config.Target, error) {
 	return config.Target{}, fmt.Errorf("no target %q in config; run `pve-runners setup` to add it", owner)
 }
 
-func cmdSpawn(ctx context.Context, cfgPath, pool, owner, repo string) error {
+func cmdReconcile(ctx context.Context, w io.Writer, cfgPath string) error {
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		return err
+	}
+	done, err := reconcile.Once(ctx, cfg, host(cfg), time.Now())
+	for _, a := range done {
+		fmt.Fprintf(w, "destroyed %d: %s\n", a.VMID, a.Reason)
+	}
+	if err == nil && len(done) == 0 {
+		fmt.Fprintln(w, "nothing to clean up")
+	}
+	return err
+}
+
+func cmdLogsShip(ctx context.Context, w io.Writer, cfgPath string) error {
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		return err
+	}
+	sh, err := logShipper(cfg)
+	if err != nil {
+		return err
+	}
+	if sh == nil {
+		return errors.New("logs.url and logs.token_file are not set in the config")
+	}
+	if err := sh.Once(ctx); err != nil {
+		return err
+	}
+	fmt.Fprintln(w, "logs shipped to", cfg.Logs.URL)
+	return nil
+}
+
+// cmdConfig validates the config file, and with show prints it as it is on disk.
+func cmdConfig(w io.Writer, cfgPath string, show bool) error {
+	data, err := os.ReadFile(cfgPath)
+	if err != nil {
+		return err
+	}
+	cfg, _, err := config.Parse(data)
+	if err != nil {
+		return err
+	}
+	if show {
+		_, err = w.Write(data)
+		return err
+	}
+	fmt.Fprintf(w, "%s is valid: %d targets, %d pools\n", cfgPath, len(cfg.Targets), len(cfg.Pools))
+	return nil
+}
+
+func cmdSpawn(ctx context.Context, w io.Writer, cfgPath, pool, owner, repo string) error {
 	cfg, err := config.Load(cfgPath)
 	if err != nil {
 		return err
@@ -559,11 +720,11 @@ func cmdSpawn(ctx context.Context, cfgPath, pool, owner, repo string) error {
 		notifier(cfg).Send(ctx, notify.SpawnFailed, fmt.Sprintf("pool %s for %s: %v", pool, t.Owner(), err))
 		return err
 	}
-	fmt.Printf("runner %s started in container %d; it will take one job from %s and then be destroyed\n", res.RunnerName, res.VMID, t.Owner())
+	fmt.Fprintf(w, "runner %s started in container %d; it will take one job from %s and then be destroyed\n", res.RunnerName, res.VMID, t.Owner())
 	return nil
 }
 
-func cmdStatus(ctx context.Context, cfgPath string) error {
+func cmdStatus(ctx context.Context, out io.Writer, cfgPath string) error {
 	cfg, err := config.Load(cfgPath)
 	if err != nil {
 		return err
@@ -574,8 +735,8 @@ func cmdStatus(ctx context.Context, cfgPath string) error {
 		return err
 	}
 	sort.Slice(runners, func(i, j int) bool { return runners[i].VMID < runners[j].VMID })
-	fmt.Printf("pve-runners %s on %s: %d/%d runners\n", buildinfo.Version, cfg.HostID, len(runners), cfg.Proxmox.MaxRunners)
-	w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
+	fmt.Fprintf(out, "pve-runners %s on %s: %d/%d runners\n", buildinfo.Version, cfg.HostID, len(runners), cfg.Proxmox.MaxRunners)
+	w := tabwriter.NewWriter(out, 0, 4, 2, ' ', 0)
 	fmt.Fprintln(w, "ID\tNAME\tSTATUS\tPOOL\tOWNER\tAGE")
 	for _, g := range runners {
 		age := "?"
@@ -587,20 +748,20 @@ func cmdStatus(ctx context.Context, cfgPath string) error {
 	}
 	w.Flush()
 	for _, a := range reconcile.Plan(cfg, runners, time.Now()) {
-		fmt.Printf("pending cleanup: %d (%s)\n", a.VMID, a.Reason)
+		fmt.Fprintf(out, "pending cleanup: %d (%s)\n", a.VMID, a.Reason)
 	}
 	if st, err := h.RootfsStorage(ctx, cfg.Proxmox.Storage); err != nil {
-		fmt.Println("warning:", err)
+		fmt.Fprintln(out, "warning:", err)
 	} else {
-		fmt.Println("container storage:", st)
+		fmt.Fprintln(out, "container storage:", st)
 	}
 	if on, err := h.ClusterFirewallEnabled(ctx); err == nil && !on && cfg.Network.Isolated() {
-		fmt.Println("warning: the datacenter firewall is off; runners cannot be isolated from the LAN, so spawning is refused")
+		fmt.Fprintln(out, "warning: the datacenter firewall is off; runners cannot be isolated from the LAN, so spawning is refused")
 	}
 	return nil
 }
 
-func cmdTemplatePrepare(ctx context.Context, cfgPath string, ctid int) error {
+func cmdTemplatePrepare(ctx context.Context, w io.Writer, cfgPath string, ctid int) error {
 	if ctid == 0 {
 		return errors.New("--ctid is required")
 	}
@@ -617,22 +778,22 @@ func cmdTemplatePrepare(ctx context.Context, cfgPath string, ctid int) error {
 	if err := provision.PrepareTemplate(ctx, host(cfg), ctid, tarball, os.TempDir()); err != nil {
 		return err
 	}
-	fmt.Printf("container %d is now a runner template; use it as the pool template in setup\n", ctid)
+	fmt.Fprintf(w, "container %d is now a runner template; use it as the pool template in setup\n", ctid)
 	return nil
 }
 
-func cmdUpdate(ctx context.Context, cfg *config.Config, install bool) error {
+func cmdUpdate(ctx context.Context, w io.Writer, cfg *config.Config, install bool) error {
 	u := updater(cfg)
 	rel, err := u.Latest(ctx)
 	if err != nil {
 		return err
 	}
 	if rel == nil {
-		fmt.Printf("pve-runners %s is current\n", buildinfo.Version)
+		fmt.Fprintf(w, "pve-runners %s is current\n", buildinfo.Version)
 		return nil
 	}
 	if !install {
-		fmt.Printf("%s is available (running %s); run `pve-runners update --now` to install\n", rel.Tag, buildinfo.Version)
+		fmt.Fprintf(w, "%s is available (running %s); run `pve-runners update --now` to install\n", rel.Tag, buildinfo.Version)
 		return nil
 	}
 	bin, err := u.Download(ctx, rel)
@@ -692,7 +853,7 @@ func cmdRun(ctx context.Context, cfgPath string) error {
 			defer imageBusy.Store(false)
 			m, err := imageManager(ctx, cfg)
 			if err == nil {
-				err = syncImages(ctx, cfg, m, true, true)
+				err = syncImages(ctx, io.Discard, cfg, m, true, true)
 			}
 			if err != nil && ctx.Err() == nil {
 				slog.Error("images", "err", err)
@@ -736,6 +897,8 @@ func cmdRun(ctx context.Context, cfgPath string) error {
 		}()
 	}
 	setShipper(cfg)
+	stopWeb := startWeb(ctx, cfg, cfgPath, &imageBusy)
+	defer func() { stopWeb() }()
 
 	// Listeners that failed to start (say, a missing key file) are retried on the reconcile tick.
 	var scaler *autoscaler
@@ -763,6 +926,8 @@ func cmdRun(ctx context.Context, cfgPath string) error {
 			cfg = c
 			slog.Info("config reloaded")
 			setShipper(cfg)
+			stopWeb()
+			stopWeb = startWeb(ctx, cfg, cfgPath, &imageBusy)
 			syncImagesAsync(cfg)
 			scaler.stop()
 			scaler = nil
@@ -785,7 +950,7 @@ func cmdRun(ctx context.Context, cfgPath string) error {
 			if !cfg.Update.Enabled || u.Pending() || provision.Busy() || imageBusy.Load() {
 				continue
 			}
-			if err := cmdUpdate(ctx, cfg, true); err != nil {
+			if err := cmdUpdate(ctx, io.Discard, cfg, true); err != nil {
 				slog.Error("self-update", "err", err)
 				n.Send(ctx, notify.UpdateFailed, err.Error())
 			}

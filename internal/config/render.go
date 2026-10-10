@@ -230,6 +230,13 @@ logs:
 {{- end}}
   interval: {{dur .Logs.Interval}}
 
+web:
+  # Settings page served by the service at https://<this host>:<port>, with the Proxmox UI's
+  # certificate. Log in with a Proxmox account that has Sys.Modify (root@pam); saving restarts the
+  # service. With the Proxmox firewall on and input policy DROP, allow this port on the host.
+  enabled: {{.Web.On}}
+  listen: {{q .Web.Listen}}
+
 update:
   # Keep this binary updated from the repo's signed releases.
   enabled: {{.Update.Enabled}}
