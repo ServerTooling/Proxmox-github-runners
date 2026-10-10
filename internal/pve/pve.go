@@ -15,6 +15,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // Tag marks every guest this tool owns. Guests without it are never modified.
@@ -28,8 +29,14 @@ type Runner interface {
 // ExecRunner runs real commands on the host.
 type ExecRunner struct{}
 
+// waitDelay bounds how long a cancelled command may keep its output open. Cancelling kills only pct
+// itself; what it started (lxc-attach and the command inside the guest) can hold the output pipe for
+// minutes, which kept the service from stopping when a restart came mid-spawn.
+var waitDelay = 5 * time.Second
+
 func (ExecRunner) Run(ctx context.Context, name string, args ...string) ([]byte, error) {
 	cmd := exec.CommandContext(ctx, name, args...)
+	cmd.WaitDelay = waitDelay
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 	if err := cmd.Run(); err != nil {
