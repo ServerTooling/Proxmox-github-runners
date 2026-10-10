@@ -76,10 +76,28 @@ each host's pools a different `scale_set` (or labels).
 | `pve-runners config validate` | Check `/etc/pve-runners/config.yaml` |
 | `pve-runners update [--now]` | Check for, or install, a newer release |
 | `pve-runners logs ship` | Send new log lines to Loki now, to test `logs:` settings |
+| `pve-runners cache list\|clear` | Show the shared runner caches' sizes, or empty the idle ones |
 
 Configuration reference: [packaging/config.example.yaml](packaging/config.example.yaml). The default
 runner is 4 cores, 8 GB RAM and a 40 GB disk, with at most 4 runners per host
 (`proxmox.max_runners`).
+
+## Faster job starts
+
+Two pool settings cut the wait before a job's first step. Every job still gets a fresh container.
+
+- `warm: N` keeps N spare runners started after a job, so the next job takes one at once instead of
+  waiting for a clone and boot. Once no job has come for `warm_for` (30m by default) the spares are
+  removed. `min: N` instead keeps N ready at all times. A runner is only removed after GitHub agrees
+  to unregister it, which it refuses while the runner has a job.
+- `cache: true` mounts a host folder (`cache.dir`, one subfolder per org or account) at
+  `/opt/pve-cache` in each runner and points the actions tool cache (`setup-node`, `setup-go`, ...),
+  npm, pnpm, yarn, Go, pip and Playwright there, so these downloads are kept between jobs. Every repo of
+  that org shares it, so a job could leave files that a later job of another repo picks up; turn it on
+  only for orgs whose repos you trust with each other. A folder over `cache.max_gb` (50 by default) is
+  emptied once none of that org's runners are running; `pve-runners cache clear` empties them now.
+  The folder lives on the host's own disk unless `cache.dir` points elsewhere, such as a ZFS dataset
+  with a quota.
 
 ## Settings page
 
@@ -89,7 +107,7 @@ every setting: host limits, network, images, updates, alerts, logs, each pool, a
 including adding an org. It also takes the notify webhook URL and the Loki token, which are written to
 their own 0600 files and never shown again. Saving validates the whole config, writes it and restarts the
 service. Buttons run what the CLI does (clean up, start a runner, list, pull or prune images, check for
-or install an update, ship logs, show the config file, prepare a template), with their output on the
+or install an update, ship logs, show or clear the runner caches, show the config file, prepare a template), with their output on the
 page; the status at the top is `pve-runners status`. Set `web.enabled: false` to turn the page off, or `web.listen` to move it. With the Proxmox
 firewall on and its input policy set to DROP, allow the port on the host.
 

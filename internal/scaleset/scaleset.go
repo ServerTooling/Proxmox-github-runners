@@ -357,6 +357,20 @@ func (c *Client) removeRunnerNamed(ctx context.Context, name string) error {
 	return nil
 }
 
+// ErrRunnerBusy means GitHub refused to remove a runner because it has a job.
+var ErrRunnerBusy = errors.New("runner has a job")
+
+// RemoveRunner unregisters a runner so no job can be given to it any more. GitHub refuses while the
+// runner has a job (ErrRunnerBusy), which is what makes removing an idle runner safe.
+func (c *Client) RemoveRunner(ctx context.Context, id int64) error {
+	err := c.call(ctx, http.MethodDelete, agentsEndpoint+"/"+strconv.FormatInt(id, 10), nil, nil, nil)
+	var se *ServiceError
+	if errors.As(err, &se) && strings.Contains(se.TypeName, "JobStillRunning") {
+		return fmt.Errorf("%w: %v", ErrRunnerBusy, err)
+	}
+	return err
+}
+
 type Statistics struct {
 	TotalAvailableJobs     int `json:"totalAvailableJobs"`
 	TotalAcquiredJobs      int `json:"totalAcquiredJobs"`

@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -66,6 +67,27 @@ func Tags(pool, owner, mode string, template int, created time.Time) []string {
 	return []string{pve.Tag, "pool-" + tagSafe(pool), OwnerTag(owner), "mode-" + mode,
 		"from-" + strconv.Itoa(template), "created-" + strconv.FormatInt(created.Unix(), 10)}
 }
+
+// RunnerIDTag records the GitHub runner ID, so an idle runner can be unregistered before its guest goes.
+func RunnerIDTag(id int64) string { return "runnerid-" + strconv.FormatInt(id, 10) }
+
+// CacheDir is the host folder an owner's runners share (pools with cache: true).
+func CacheDir(cfg *config.Config, owner string) string {
+	return filepath.Join(cfg.Cache.Dir, tagSafe(owner))
+}
+
+// cacheEnv points the runner's tools at the mounted cache; the runner reads .env into every job's
+// environment. The tool cache is where setup-node, setup-go and the like keep the versions they install.
+var cacheEnv = strings.ReplaceAll(`RUNNER_TOOL_CACHE=@/toolcache
+AGENT_TOOLSDIRECTORY=@/toolcache
+npm_config_cache=@/npm
+npm_config_store_dir=@/pnpm
+YARN_CACHE_FOLDER=@/yarn
+GOMODCACHE=@/go/mod
+GOCACHE=@/go/build
+PIP_CACHE_DIR=@/pip
+PLAYWRIGHT_BROWSERS_PATH=@/ms-playwright
+`, "@", pve.CacheMount)
 
 // OwnerTag is the tag naming the org or account a runner serves.
 func OwnerTag(owner string) string { return "owner-" + tagSafe(owner) }
@@ -201,9 +223,24 @@ func (p *Provisioner) Spawn(ctx context.Context, req Request) (res *Result, err 
 		}
 	}()
 	tags := append(Tags(req.Pool, t.Owner(), pool.Mode, template, p.now()), req.Tags...)
+	if jit.Runner.ID != 0 {
+		tags = append(tags, RunnerIDTag(jit.Runner.ID))
+	}
 	spec := pve.LXCSpec{Cores: pool.Cores, MemoryMB: pool.MemoryMB, Tags: tags,
 		Bridge: pool.Bridge, VLAN: pool.VLAN, Nameservers: p.Cfg.Network.DNS,
 		Description: "GitHub Actions runner managed by pve-runners"}
+	if pool.Cache {
+		spec.CacheDir = CacheDir(p.Cfg, t.Owner())
+		// The parent can be passed through but not listed. The owner's folder is open to every user
+		// in the container, whose IDs are shifted on the host, with the sticky bit so files stay
+		// their creator's.
+		if err = p.Host.Exec(ctx, pve.MkdirCmd(p.Cfg.Cache.Dir, "0711")); err != nil {
+			return nil, err
+		}
+		if err = p.Host.Exec(ctx, pve.MkdirCmd(spec.CacheDir, "1777")); err != nil {
+			return nil, err
+		}
+	}
 	if err = p.Host.Exec(ctx, pve.LXCSet(id, spec)); err != nil {
 		return nil, err
 	}
@@ -222,8 +259,13 @@ func (p *Provisioner) Spawn(ctx context.Context, req Request) (res *Result, err 
 	if err = p.Host.Exec(ctx, pve.LXCStart(id)); err != nil {
 		return nil, err
 	}
-	if err = p.pushSecret(ctx, id, jit.EncodedJITConfig, "/etc/gh-runner/jitconfig"); err != nil {
+	if err = p.pushFile(ctx, id, jit.EncodedJITConfig, "/etc/gh-runner/jitconfig", "0600"); err != nil {
 		return nil, err
+	}
+	if pool.Cache {
+		if err = p.pushFile(ctx, id, cacheEnv, "/opt/actions-runner/.env", "0644"); err != nil {
+			return nil, err
+		}
 	}
 	if err = p.Host.Exec(ctx, pve.LXCExec(id, "sh", "-c", startRunner)); err != nil {
 		return nil, err
@@ -231,10 +273,16 @@ func (p *Provisioner) Spawn(ctx context.Context, req Request) (res *Result, err 
 	return &Result{VMID: id, Name: name, RunnerID: jit.Runner.ID, RunnerName: jit.Runner.Name}, nil
 }
 
-// startRunner waits for the guest to finish booting first: a start queued while boot jobs (such as
-// systemd-sysusers) are still settling is refused as a destructive transaction. A degraded or slow
-// boot still goes ahead after the wait, and the runner unit reports its own failures.
-const startRunner = "timeout 120 systemctl is-system-running --wait >/dev/null 2>&1; exec systemctl start gh-runner.service"
+// startRunner waits for the guest's systemd to finish booting first. Right after "pct start" systemd
+// may not even answer on its bus yet ("Failed to connect to bus"), and a start queued while boot jobs
+// (such as systemd-sysusers) are still settling is refused as a destructive transaction, so it polls
+// until the system is running. A degraded or slow boot still goes ahead after the wait, and the runner
+// unit reports its own failures.
+const startRunner = `i=0
+until s=$(systemctl is-system-running 2>/dev/null); [ "$s" = running ] || [ "$s" = degraded ]; do
+  i=$((i+1)); [ "$i" -ge 180 ] && break; sleep 1
+done
+exec systemctl start gh-runner.service`
 
 func (p *Provisioner) jit(ctx context.Context, req Request, name string, labels []string) (*github.JITConfig, error) {
 	if req.JIT != nil {
@@ -255,9 +303,9 @@ func (p *Provisioner) jit(ctx context.Context, req Request, name string, labels 
 	return gh.OrgJITConfig(ctx, t.InstallationID, t.Org, jreq)
 }
 
-// pushSecret writes a secret to a 0600 temp file, pushes it into the guest, and removes the temp
-// copy. The secret never appears in a command line or in guest config.
-func (p *Provisioner) pushSecret(ctx context.Context, id int, secret, dst string) error {
+// pushFile writes content to a 0600 temp file, pushes it into the guest, and removes the temp copy.
+// A secret pushed this way never appears in a command line or in guest config.
+func (p *Provisioner) pushFile(ctx context.Context, id int, secret, dst, perms string) error {
 	f, err := os.CreateTemp(p.TmpDir, "pve-runners-secret-*")
 	if err != nil {
 		return err
@@ -274,7 +322,7 @@ func (p *Provisioner) pushSecret(ctx context.Context, id int, secret, dst string
 	if err := f.Close(); err != nil {
 		return err
 	}
-	return p.Host.Exec(ctx, pve.LXCPush(id, f.Name(), dst, "0600"))
+	return p.Host.Exec(ctx, pve.LXCPush(id, f.Name(), dst, perms))
 }
 
 // PrepareTemplate installs the runner into an existing, running container and converts it to a

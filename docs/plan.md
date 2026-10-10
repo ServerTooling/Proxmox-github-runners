@@ -323,10 +323,11 @@ update:
 **Phase 3: autoscaling (delivered)**
 - `internal/scaleset` speaks the scale set protocol directly (no dependency): registration token traded for an Actions service admin token, scale set found or created per pool (named after its first label, or `scale_set`), message session, long-poll, acquire, JIT configs in the scale set.
 - `internal/autoscale` runs one listener per org x pool (per repo for personal accounts) under `pve-runners run`, restarted with backoff and again on reload. Runners wanted = min(pool max, pool min + jobs GitHub has assigned); host and pool limits still apply in `Spawn`, which is now serialized. Each runner is tagged `scaleset-<id>`, so a restart counts the ones already running. Jobs from public repos, other owners, or repos outside a target's `repos` list are never acquired. `autoscale.enabled: false` turns it off.
-- Idle runners left by a cancelled job keep waiting for the next job; set `max_lifetime` to cap them (cleaning them up automatically is Phase 4).
+- Idle runners beyond what is wanted (a cancelled job's runner, or warm spares past `warm_for`) are unregistered and destroyed; GitHub refuses to unregister a runner with a job, so a busy one is never removed.
+- Warm pool and shared cache (delivered): `warm`/`warm_for` keep spare runners for a while after a job; `cache: true` mounts a per-owner host folder for the tool cache and package managers, trimmed to `cache.max_gb` when idle.
 
 **Phase 4: breadth**
-- repo-level targets, warm idle runners, VM pools via `qm`, orphaned-runner cleanup, `doctor`, headless device-flow setup.
+- repo-level targets, VM pools via `qm`, orphaned-runner cleanup, `doctor`, headless device-flow setup.
 
 **Later (on request): permanent runners**
 - `mode: permanent` pools kept at `min` running, registered with a registration token instead of JIT. The config field already exists so no rework is needed.

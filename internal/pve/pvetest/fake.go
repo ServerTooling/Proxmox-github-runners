@@ -179,6 +179,10 @@ func (f *Fake) Run(_ context.Context, name string, args ...string) ([]byte, erro
 		return []byte("/var/lib/vz/template/cache/" + file + "\n"), nil
 	case name == "pct":
 		return nil, f.pct(args)
+	case name == "install" || name == "find":
+		return nil, nil
+	case name == "du":
+		return []byte("0\t" + args[len(args)-1] + "\n"), nil
 	}
 	return nil, fmt.Errorf("fake: unexpected command %q", line)
 }
@@ -267,7 +271,7 @@ func (f *Fake) Mutations() []string {
 	defer f.mu.Unlock()
 	var out []string
 	for _, c := range f.Calls {
-		if !strings.HasPrefix(c, "pvesh get ") {
+		if !strings.HasPrefix(c, "pvesh get ") && !strings.HasPrefix(c, "cat ") && !strings.HasPrefix(c, "du ") {
 			out = append(out, c)
 		}
 	}

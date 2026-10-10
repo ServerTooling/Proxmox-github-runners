@@ -26,6 +26,14 @@ func TestCommandBuildersExactArgv(t *testing.T) {
 			"pct set 9001 --cores 1 --memory 512 --tags gh-runner --onboot 0 --description d --net0 name=eth0,bridge=vmbr1,ip=dhcp,firewall=1,tag=50"},
 		{pve.LXCSet(9001, pve.LXCSpec{Cores: 1, MemoryMB: 512, Nameservers: []string{"192.0.2.53", "198.51.100.53"}}),
 			"pct set 9001 --cores 1 --memory 512 --tags  --onboot 0 --nameserver 192.0.2.53 198.51.100.53"},
+		{pve.LXCSet(9001, pve.LXCSpec{Cores: 1, MemoryMB: 512, CacheDir: "/var/lib/pve-runners/cache/example-org"}),
+			"pct set 9001 --cores 1 --memory 512 --tags  --onboot 0 --mp0 /var/lib/pve-runners/cache/example-org,mp=/opt/pve-cache"},
+		{pve.MkdirCmd("/var/lib/pve-runners/cache/example-org", "1777"), "install -d -m 1777 /var/lib/pve-runners/cache/example-org"},
+		{pve.DiskUsageCmd("/var/lib/pve-runners/cache/example-org"), "du -s -x -B1 /var/lib/pve-runners/cache/example-org"},
+		{pve.EmptyDirCmd("/var/lib/pve-runners/cache/example-org"),
+			"find /var/lib/pve-runners/cache/example-org -xdev -mindepth 1 -delete"},
+		{pve.MemInfoCmd(), "cat /proc/meminfo"},
+		{pve.ARCStatsCmd(), "cat /proc/spl/kstat/zfs/arcstats"},
 		{pve.RunnerUnitStateCmd(9001), "pct exec 9001 -- systemctl is-active gh-runner.service"},
 		{pve.ServiceJournalCmd("", 500), "journalctl -u pve-runners.service -o json --no-pager -n 500"},
 		{pve.RunnerJournalCmd(9001, "s=abc;i=1", 500),
@@ -149,11 +157,37 @@ func TestDestroyRefusesGuestsItDoesNotOwn(t *testing.T) {
 	}
 }
 
-func TestFreeMemory(t *testing.T) {
+// Without /proc (or MemAvailable in it) the node's own figure is used.
+func TestFreeMemoryFallsBackToNodeStatus(t *testing.T) {
 	f := pvetest.New()
 	f.FreeMB = 1234
 	mb, err := host(f).FreeMemoryMB(context.Background())
 	if err != nil || mb != 1234 {
+		t.Fatalf("got %d, %v", mb, err)
+	}
+}
+
+const meminfo = "MemTotal:       61759488 kB\nMemFree:         1048576 kB\nMemAvailable:   10035200 kB\n"
+
+// The ZFS ARC above its floor gives memory back under pressure, so it counts as free.
+func TestFreeMemoryCountsShrinkableZFSCache(t *testing.T) {
+	f := pvetest.New()
+	f.Outputs = map[string]string{
+		"cat /proc/meminfo": meminfo,
+		// 24 GiB of ARC, of which 2 GiB is its floor.
+		"cat /proc/spl/kstat/zfs/arcstats": "9 1 0x01 147 39984 1 2\nname type data\nhits 4 100\n" +
+			"c_min 4 2147483648\nsize 4 25769803776\n",
+	}
+	mb, err := host(f).FreeMemoryMB(context.Background())
+	if want := 9800 + 22*1024; err != nil || mb != want {
+		t.Fatalf("got %d, %v; want %d", mb, err, want)
+	}
+}
+
+func TestFreeMemoryWithoutZFS(t *testing.T) {
+	f := pvetest.New()
+	f.Outputs = map[string]string{"cat /proc/meminfo": meminfo}
+	if mb, err := host(f).FreeMemoryMB(context.Background()); err != nil || mb != 9800 {
 		t.Fatalf("got %d, %v", mb, err)
 	}
 }

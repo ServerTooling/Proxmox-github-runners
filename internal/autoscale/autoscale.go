@@ -3,10 +3,13 @@
 // private repositories, and keeps as many runners alive as GitHub says jobs are assigned.
 //
 // Runner guests carry a scaleset-<id> tag, so a restarted listener counts the runners it already
-// has instead of starting duplicates.
+// has instead of starting duplicates. Runners beyond what is wanted (a cancelled job, or warm spares
+// whose time is up) are unregistered and destroyed; GitHub refuses to unregister one that has a job,
+// so a busy runner is never taken away.
 package autoscale
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -30,6 +33,7 @@ type Service interface {
 	EnsureScaleSet(ctx context.Context, name string, groupID int64, labels []string) (*scaleset.ScaleSet, error)
 	CreateSession(ctx context.Context, scaleSetID int64, owner string) (*scaleset.Session, error)
 	GenerateJIT(ctx context.Context, scaleSetID int64, name, workFolder string) (*scaleset.JITConfig, error)
+	RemoveRunner(ctx context.Context, id int64) error
 }
 
 type Listener struct {
@@ -60,8 +64,10 @@ type Listener struct {
 
 	scaleSetID int64
 	lastFail   string
-	privMu     sync.Mutex
-	private    map[string]privEntry
+	// lastJob is when this scale set last had a job; warm spares are kept for pool.warm_for after it.
+	lastJob time.Time
+	privMu  sync.Mutex
+	private map[string]privEntry
 }
 
 type privEntry struct {
@@ -134,6 +140,11 @@ func (l *Listener) run(ctx context.Context) error {
 		}
 	}()
 	l.log().Info("listening for jobs", "listener", l.Name(), "scale_set_id", ss.ID)
+	// After a restart (a self-update, a saved setting) runners still up mean jobs came recently, so
+	// warm spares get a fresh window instead of being dropped at once.
+	if n, _, err := l.live(ctx); err == nil && n > 0 {
+		l.lastJob = l.now()
+	}
 
 	stats := sess.Statistics()
 	l.scale(ctx, stats)
@@ -206,8 +217,12 @@ func (l *Listener) handle(ctx context.Context, sess *scaleset.Session, msg *scal
 		case "JobAvailable":
 			if l.serves(ctx, j) {
 				claim = append(claim, j.RunnerRequestID)
+				l.lastJob = l.now()
 			}
+		case "JobAssigned":
+			l.lastJob = l.now()
 		case "JobStarted":
+			l.lastJob = l.now()
 			l.log().Info("job started", "listener", l.Name(), "repo", j.OwnerName+"/"+j.RepositoryName, "runner", j.RunnerName)
 		case "JobCompleted":
 			l.log().Info("job completed", "listener", l.Name(), "repo", j.OwnerName+"/"+j.RepositoryName,
@@ -273,9 +288,18 @@ func (l *Listener) isPrivate(ctx context.Context, owner, repo string) (bool, err
 }
 
 // Desired is the runner count GitHub's statistics call for: every assigned job gets a runner, plus
-// the pool's min idle ones, capped at max.
-func Desired(stats scaleset.Statistics, min, max int) int {
-	return Clamp(min+stats.TotalAssignedJobs, max)
+// the idle ones the pool keeps ready (min, and warm spares after a job), capped at max.
+func Desired(stats scaleset.Statistics, idle, max int) int {
+	return Clamp(idle+stats.TotalAssignedJobs, max)
+}
+
+// idle is how many spare runners to keep: always min, plus warm until warm_for has passed with no job.
+func (l *Listener) idle() int {
+	n := l.Pool.Min
+	if l.Pool.Warm > 0 && !l.lastJob.IsZero() && l.now().Sub(l.lastJob) < l.Pool.WarmFor {
+		n += l.Pool.Warm
+	}
+	return n
 }
 
 func Clamp(n, max int) int {
@@ -286,14 +310,16 @@ func Clamp(n, max int) int {
 }
 
 // live counts this scale set's runners that are still running a job or about to. A stopped ephemeral
-// runner past the start grace period has finished and is waiting for reconcile to destroy it.
-func (l *Listener) live(ctx context.Context) (int, error) {
+// runner past the start grace period has finished and is waiting for reconcile to destroy it. It also
+// returns the running ones that could be removed if there are too many, newest first.
+func (l *Listener) live(ctx context.Context) (int, []pve.Guest, error) {
 	runners, err := l.Host.Runners(ctx)
 	if err != nil {
-		return 0, err
+		return 0, nil, err
 	}
 	tag, owner := ScaleSetTag(l.scaleSetID), provision.OwnerTag(l.Target.Owner())
 	n := 0
+	var spare []pve.Guest
 	for _, g := range runners {
 		if !g.HasTag(tag) || !g.HasTag(owner) {
 			continue
@@ -302,15 +328,29 @@ func (l *Listener) live(ctx context.Context) (int, error) {
 		if g.Status != "stopped" || l.now().Sub(time.Unix(created, 0)) < reconcile.Grace {
 			n++
 		}
+		// Runners from before the runnerid tag can't be unregistered by ID; max_lifetime still caps them.
+		if g.Status == "running" && g.TagValue("runnerid") != "" {
+			spare = append(spare, g)
+		}
 	}
-	return n, nil
+	slices.SortFunc(spare, func(a, b pve.Guest) int { return cmp.Compare(createdAt(b), createdAt(a)) })
+	return n, spare, nil
+}
+
+func createdAt(g pve.Guest) int64 {
+	n, _ := strconv.ParseInt(g.TagValue("created"), 10, 64)
+	return n
 }
 
 func (l *Listener) scale(ctx context.Context, stats scaleset.Statistics) {
-	want := Desired(stats, l.Pool.Min, l.capacity())
-	have, err := l.live(ctx)
+	want := Desired(stats, l.idle(), l.capacity())
+	have, spare, err := l.live(ctx)
 	if err != nil {
 		l.log().Error("count runners", "listener", l.Name(), "err", err)
+		return
+	}
+	if have > want {
+		l.trim(ctx, spare, have-want)
 		return
 	}
 	for ; have < want; have++ {
@@ -334,6 +374,32 @@ func (l *Listener) scale(ctx context.Context, stats scaleset.Statistics) {
 		}
 		l.lastFail = ""
 		l.log().Info("runner started", "listener", l.Name(), "vmid", res.VMID, "runner", res.RunnerName)
+	}
+}
+
+// trim removes up to n idle runners. Each is unregistered first, so GitHub can't hand it a job while
+// its container goes away; one GitHub says has a job is skipped.
+func (l *Listener) trim(ctx context.Context, spare []pve.Guest, n int) {
+	for _, g := range spare {
+		if n == 0 || ctx.Err() != nil {
+			return
+		}
+		id, _ := strconv.ParseInt(g.TagValue("runnerid"), 10, 64)
+		if err := l.Service.RemoveRunner(ctx, id); err != nil {
+			if !errors.Is(err, scaleset.ErrRunnerBusy) {
+				// Already gone (its job just ended) or GitHub unreachable: reconcile or the next poll
+				// takes care of it.
+				l.log().Warn("unregister idle runner", "listener", l.Name(), "vmid", g.VMID, "err", err)
+			}
+			continue
+		}
+		if err := l.Host.Destroy(ctx, g.VMID); err != nil {
+			// Unregistered, so it can't take a job; its runner exits and reconcile destroys it.
+			l.log().Warn("destroy idle runner", "listener", l.Name(), "vmid", g.VMID, "err", err)
+		} else {
+			l.log().Info("removed idle runner", "listener", l.Name(), "vmid", g.VMID, "runner", g.Name)
+		}
+		n--
 	}
 }
 

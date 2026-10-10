@@ -66,7 +66,12 @@ type LXCSpec struct {
 	VLAN        int
 	// Nameservers replaces the DNS servers the guest would otherwise copy from the host.
 	Nameservers []string
+	// CacheDir is a host folder bind-mounted at CacheMount (pool cache: true).
+	CacheDir string
 }
+
+// CacheMount is where a runner sees its owner's shared cache folder.
+const CacheMount = "/opt/pve-cache"
 
 func LXCSet(id int, s LXCSpec) Cmd {
 	args := []string{"set", strconv.Itoa(id),
@@ -88,6 +93,10 @@ func LXCSet(id int, s LXCSpec) Cmd {
 	if len(s.Nameservers) > 0 {
 		args = append(args, "--nameserver", strings.Join(s.Nameservers, " "))
 	}
+	if s.CacheDir != "" {
+		// Bind mounts are never part of backups or snapshots, and pct destroy leaves them alone.
+		args = append(args, "--mp0", s.CacheDir+",mp="+CacheMount)
+	}
 	return Cmd{"pct", args}
 }
 
@@ -95,6 +104,20 @@ func LXCSet(id int, s LXCSpec) Cmd {
 // at least the template's own root disk size or the spawn fails (and the clone is cleaned up).
 func LXCResize(id, sizeGB int) Cmd {
 	return Cmd{"pct", []string{"resize", strconv.Itoa(id), "rootfs", strconv.Itoa(sizeGB) + "G"}}
+}
+
+// MkdirCmd creates a host folder (and its parents) with the given mode, or sets the mode if it exists.
+func MkdirCmd(path, mode string) Cmd {
+	return Cmd{"install", []string{"-d", "-m", mode, path}}
+}
+
+// DiskUsageCmd prints a host folder's size in bytes, then a tab and the path; -x stays on its filesystem.
+func DiskUsageCmd(path string) Cmd { return Cmd{"du", []string{"-s", "-x", "-B1", path}} }
+
+// EmptyDirCmd deletes everything inside a host folder but the folder itself; -xdev keeps it from
+// following into other filesystems mounted below it.
+func EmptyDirCmd(path string) Cmd {
+	return Cmd{"find", []string{path, "-xdev", "-mindepth", "1", "-delete"}}
 }
 
 func LXCStart(id int) Cmd { return Cmd{"pct", []string{"start", strconv.Itoa(id)}} }
@@ -332,8 +355,28 @@ func (h *Host) RunnerUnitState(ctx context.Context, id int) (string, error) {
 	return "", err
 }
 
-// FreeMemoryMB reports the node's free memory, used to avoid starving the host.
+// MemInfoCmd and ARCStatsCmd read the host's memory counters; the service runs on the node itself.
+func MemInfoCmd() Cmd  { return Cmd{"cat", []string{"/proc/meminfo"}} }
+func ARCStatsCmd() Cmd { return Cmd{"cat", []string{"/proc/spl/kstat/zfs/arcstats"}} }
+
+// FreeMemoryMB reports the memory the node could hand to a new runner, used to avoid starving the
+// host: MemAvailable plus the part of the ZFS ARC that shrinks under pressure. Proxmox's own "free"
+// counts the whole ARC as used, which on a ZFS host can hold back runners while gigabytes of cache
+// would make way. Falls back to Proxmox's figure when /proc can't be read.
 func (h *Host) FreeMemoryMB(ctx context.Context) (int, error) {
+	if out, err := h.run(ctx, MemInfoCmd()); err == nil {
+		if avail, ok := procField(out, "MemAvailable:", 1); ok {
+			avail <<= 10 // kB
+			if arc, err := h.run(ctx, ARCStatsCmd()); err == nil {
+				size, ok1 := procField(arc, "size", 2)
+				cmin, ok2 := procField(arc, "c_min", 2)
+				if ok1 && ok2 && size > cmin {
+					avail += size - cmin
+				}
+			}
+			return int(avail / (1 << 20)), nil
+		}
+	}
 	out, err := h.run(ctx, NodeStatusCmd(h.Node))
 	if err != nil {
 		return 0, err
@@ -353,6 +396,19 @@ func (h *Host) FreeMemoryMB(ctx context.Context) (int, error) {
 		free = st.Memory.Total - st.Memory.Used
 	}
 	return int(free / (1 << 20)), nil
+}
+
+// procField finds the line whose first word is key and returns its col'th field as a number
+// (/proc/meminfo: "MemAvailable: 123 kB" is col 1; arcstats: "size 4 123" is col 2).
+func procField(out []byte, key string, col int) (int64, bool) {
+	for _, line := range strings.Split(string(out), "\n") {
+		f := strings.Fields(line)
+		if len(f) > col && f[0] == key {
+			n, err := strconv.ParseInt(f[col], 10, 64)
+			return n, err == nil
+		}
+	}
+	return 0, false
 }
 
 // TemplateTag marks template containers this tool created from downloaded images. They live in their

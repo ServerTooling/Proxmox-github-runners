@@ -241,3 +241,99 @@ func TestDesired(t *testing.T) {
 		}
 	}
 }
+
+// clock is a listener clock tests can move forward.
+type clock struct {
+	mu  sync.Mutex
+	add time.Duration
+}
+
+func (c *clock) now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return time.Now().Add(c.add)
+}
+
+func (c *clock) advance(d time.Duration) {
+	c.mu.Lock()
+	c.add += d
+	c.mu.Unlock()
+}
+
+func TestWarmSpareStaysAfterAJobThenLeaves(t *testing.T) {
+	h := newHarness(t)
+	h.l.Pool.Warm, h.l.Pool.WarmFor = 1, 30*time.Minute
+	var c clock
+	h.l.Now = c.now
+	h.start(t)
+	eventually(t, "session", func() bool { return h.svc.Sessions() == 1 })
+	time.Sleep(50 * time.Millisecond)
+	if n := len(h.runners(t)); n != 0 {
+		t.Fatalf("%d runners before any job; warm spares only follow a job", n)
+	}
+
+	h.svc.Push(1, scalesettest.Job{Type: "JobAvailable", RunnerRequestID: 1, RepositoryName: "app", OwnerName: "example-org"})
+	eventually(t, "a runner for the job and a warm spare", func() bool { return len(h.runners(t)) == 2 })
+	// The newer runner (9001, GitHub ID 102) took the job; the older one is the spare.
+	h.svc.SetBusy(102, true)
+	h.svc.Push(1, scalesettest.Job{Type: "JobStarted", RunnerRequestID: 1, RepositoryName: "app", OwnerName: "example-org"})
+	eventually(t, "message ack", func() bool { return h.svc.Pending() == 0 })
+	c.advance(29 * time.Minute)
+	time.Sleep(50 * time.Millisecond)
+	if n := len(h.runners(t)); n != 2 {
+		t.Fatalf("%d runners inside warm_for, want 2", n)
+	}
+
+	c.advance(2 * time.Minute)
+	eventually(t, "the spare removed", func() bool { return len(h.runners(t)) == 1 })
+	if got := h.runners(t)[0].VMID; got != 9001 {
+		t.Errorf("kept %d; the runner with the job must stay", got)
+	}
+	if got := h.svc.Removed(); len(got) != 1 || got[0] != 101 {
+		t.Errorf("unregistered %v, want only the spare (101)", got)
+	}
+}
+
+func TestBusyRunnerIsNeverRemoved(t *testing.T) {
+	now := time.Now()
+	tags := func(created time.Time, id string) string {
+		return strings.Join(append(provision.Tags("small", "example-org", "ephemeral", 8000, created),
+			"scaleset-1", "runnerid-"+id), ";")
+	}
+	h := newHarness(t,
+		pve.Guest{VMID: 9003, Name: "gh-pve1-small-9003", Type: "lxc", Status: "running", RawTags: tags(now.Add(-time.Hour), "7")},
+		pve.Guest{VMID: 9004, Name: "gh-pve1-small-9004", Type: "lxc", Status: "running", RawTags: tags(now.Add(-time.Minute), "8")})
+	h.svc.AddRunner("gh-pve1-small-9003", 7)
+	h.svc.AddRunner("gh-pve1-small-9004", 8)
+	h.svc.SetBusy(7, true)
+	h.svc.SetBusy(8, true)
+	// GitHub's statistics lag behind: no assigned jobs, so both look surplus.
+	h.start(t)
+	eventually(t, "a few polls", func() bool { return len(h.svc.CallsTo("GET", "/queue/*")) > 3 })
+	if n := len(h.runners(t)); n != 2 || len(h.svc.Removed()) != 0 {
+		t.Fatalf("%d runners left, removed %v; GitHub said both have jobs", n, h.svc.Removed())
+	}
+	// One finishes its job without the container stopping yet, then it may go.
+	h.svc.SetBusy(8, false)
+	eventually(t, "the idle one removed", func() bool { return len(h.runners(t)) == 1 })
+	if h.runners(t)[0].VMID != 9003 {
+		t.Errorf("removed the busy runner")
+	}
+}
+
+func TestIdle(t *testing.T) {
+	var c clock
+	l := &Listener{Pool: &config.Pool{Min: 1, Warm: 2, WarmFor: 30 * time.Minute}, Now: c.now}
+	if n := l.idle(); n != 1 {
+		t.Errorf("no job yet: %d, want min 1", n)
+	}
+	l.lastJob = c.now()
+	c.advance(10 * time.Minute)
+	if n := l.idle(); n != 3 {
+		t.Errorf("10m after a job: %d, want 3", n)
+	}
+	c.advance(25 * time.Minute)
+	if n := l.idle(); n != 1 {
+		t.Errorf("35m after a job: %d, want 1", n)
+	}
+}

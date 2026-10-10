@@ -303,3 +303,27 @@ func TestGitHubURL(t *testing.T) {
 		}
 	}
 }
+
+func TestRemoveRunner(t *testing.T) {
+	f := scalesettest.New()
+	defer f.Close()
+	f.AddRunner("idle", 7)
+	f.AddRunner("busy", 8)
+	f.SetBusy(8, true)
+	c := newClient(f)
+	if err := c.RemoveRunner(context.Background(), 7); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.RemoveRunner(context.Background(), 8); !errors.Is(err, ErrRunnerBusy) {
+		t.Fatalf("busy runner: %v", err)
+	}
+	if err := c.RemoveRunner(context.Background(), 99); err == nil || errors.Is(err, ErrRunnerBusy) {
+		t.Fatalf("unknown runner: %v", err)
+	}
+	if got := f.Removed(); len(got) != 1 || got[0] != 7 {
+		t.Errorf("removed = %v", got)
+	}
+	if del := f.CallsTo("DELETE", "/svc/_apis/distributedtask/pools/0/agents/7"); len(del) != 1 || !strings.HasPrefix(del[0].Auth, "Bearer ") {
+		t.Errorf("delete calls = %+v", del)
+	}
+}
