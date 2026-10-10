@@ -17,6 +17,7 @@ network:
   isolate: true                    # internet yes, LAN no (needs the datacenter firewall on)
   # allow:                         # LAN exceptions; default is DNS (53) and DHCP (67) only
   #   - {dest: 192.0.2.1, proto: udp, port: 53}
+  # dns: [1.1.1.1, 9.9.9.9]          # runners' DNS servers; default copies the host's, which may not answer from the runner bridge
 
 targets:                           # one per org (or personal account), each with its own private App
   - org: example-org

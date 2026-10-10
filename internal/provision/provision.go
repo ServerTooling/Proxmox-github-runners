@@ -202,7 +202,8 @@ func (p *Provisioner) Spawn(ctx context.Context, req Request) (res *Result, err 
 	}()
 	tags := append(Tags(req.Pool, t.Owner(), pool.Mode, template, p.now()), req.Tags...)
 	spec := pve.LXCSpec{Cores: pool.Cores, MemoryMB: pool.MemoryMB, Tags: tags,
-		Bridge: pool.Bridge, VLAN: pool.VLAN, Description: "GitHub Actions runner managed by pve-runners"}
+		Bridge: pool.Bridge, VLAN: pool.VLAN, Nameservers: p.Cfg.Network.DNS,
+		Description: "GitHub Actions runner managed by pve-runners"}
 	if err = p.Host.Exec(ctx, pve.LXCSet(id, spec)); err != nil {
 		return nil, err
 	}

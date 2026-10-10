@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -136,6 +137,8 @@ type Network struct {
 	Isolate *bool           `yaml:"isolate,omitempty"` // default true
 	Blocked []string        `yaml:"blocked,omitempty"` // default pve.DefaultBlocked
 	Allow   []pve.AllowRule `yaml:"allow,omitempty"`   // LAN exceptions; default DNS + DHCP
+	// DNS servers for runners; empty copies the host's, which may not answer from the runner bridge.
+	DNS []string `yaml:"dns,omitempty"`
 }
 
 func (n Network) Isolated() bool { return n.Isolate == nil || *n.Isolate }
@@ -435,6 +438,11 @@ func (c *Config) Validate() error {
 		}
 		if a.Port < 1 || a.Port > 65535 {
 			add("network.allow[%d].port must be 1-65535", i)
+		}
+	}
+	for i, ip := range c.Network.DNS {
+		if net.ParseIP(ip) == nil {
+			add("network.dns[%d] %q is not an IP address", i, ip)
 		}
 	}
 	switch c.Notify.Format {

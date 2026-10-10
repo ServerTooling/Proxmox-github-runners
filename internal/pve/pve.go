@@ -64,6 +64,8 @@ type LXCSpec struct {
 	Description string
 	Bridge      string
 	VLAN        int
+	// Nameservers replaces the DNS servers the guest would otherwise copy from the host.
+	Nameservers []string
 }
 
 func LXCSet(id int, s LXCSpec) Cmd {
@@ -82,6 +84,9 @@ func LXCSet(id int, s LXCSpec) Cmd {
 			net += ",tag=" + strconv.Itoa(s.VLAN)
 		}
 		args = append(args, "--net0", net)
+	}
+	if len(s.Nameservers) > 0 {
+		args = append(args, "--nameserver", strings.Join(s.Nameservers, " "))
 	}
 	return Cmd{"pct", args}
 }
