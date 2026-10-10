@@ -98,6 +98,15 @@ func ScaleSetTag(id int64) string { return "scaleset-" + strconv.FormatInt(id, 1
 
 // Run serves the scale set until ctx ends or the session fails; the caller restarts it with backoff.
 func (l *Listener) Run(ctx context.Context) error {
+	err := l.run(ctx)
+	if ctx.Err() != nil {
+		// Shutting down mid-request (opening a session, handling a message) is not a failure.
+		return nil
+	}
+	return err
+}
+
+func (l *Listener) run(ctx context.Context) error {
 	if l.Group != nil {
 		id, err := l.Group(ctx)
 		if err != nil {
@@ -140,10 +149,6 @@ func (l *Listener) Run(ctx context.Context) error {
 		if msg != nil {
 			lastID = msg.ID
 			if err := l.handle(ctx, sess, msg); err != nil {
-				if ctx.Err() != nil {
-					// Shutting down mid-request is not a failure; the session is closed below.
-					return nil
-				}
 				return err
 			}
 			if msg.Statistics != nil {

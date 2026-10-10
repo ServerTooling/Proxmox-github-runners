@@ -312,13 +312,22 @@ func (c *Client) GenerateJIT(ctx context.Context, scaleSetID int64, name, workFo
 		return &out, nil
 	}
 	if rerr := c.removeRunnerNamed(ctx, name); rerr != nil {
-		return nil, errors.Join(err, fmt.Errorf("remove stale runner %s: %w", name, rerr))
+		// Never let a stale name block spawning: register under a unique name instead. The stale
+		// registration is offline and harmless, and GitHub drops it on its own.
+		body["name"] = name + "-" + strconv.FormatInt(c.now().Unix()%1e6, 36)
+		if err2 := c.call(ctx, http.MethodPost, path, nil, body, &out); err2 != nil {
+			return nil, errors.Join(err, fmt.Errorf("remove stale runner %s: %w", name, rerr), err2)
+		}
+		return &out, nil
 	}
 	if err := c.call(ctx, http.MethodPost, path, nil, body, &out); err != nil {
 		return nil, err
 	}
 	return &out, nil
 }
+
+// agentsEndpoint lists and removes registered runners; the runtime API has no runner lookup.
+const agentsEndpoint = "_apis/distributedtask/pools/0/agents"
 
 func isRunnerExists(err error) bool {
 	var se *ServiceError
@@ -333,14 +342,14 @@ func (c *Client) removeRunnerNamed(ctx context.Context, name string) error {
 			Name string `json:"name"`
 		} `json:"value"`
 	}
-	if err := c.call(ctx, http.MethodGet, "_apis/runtime/runners", url.Values{"agentName": {name}}, nil, &list); err != nil {
+	if err := c.call(ctx, http.MethodGet, agentsEndpoint, url.Values{"agentName": {name}}, nil, &list); err != nil {
 		return err
 	}
 	for _, r := range list.Value {
 		if r.Name != name {
 			continue
 		}
-		if err := c.call(ctx, http.MethodDelete, "_apis/distributedtask/pools/0/agents/"+strconv.FormatInt(r.ID, 10),
+		if err := c.call(ctx, http.MethodDelete, agentsEndpoint+"/"+strconv.FormatInt(r.ID, 10),
 			nil, nil, nil); err != nil {
 			return err
 		}
