@@ -241,6 +241,10 @@ func (c *Client) RunnerGroupID(ctx context.Context, inst int64, org, name string
 	}
 	path := "/orgs/" + url.PathEscape(org) + "/actions/runner-groups?per_page=100"
 	if err := c.asInstallation(ctx, inst, http.MethodGet, path, nil, &out); err != nil {
+		var ae *APIError
+		if errors.As(err, &ae) && ae.Status == http.StatusNotFound {
+			return 0, fmt.Errorf("%w (is %s a personal account? Those need a user: target with repos; re-run setup with \"Create App for my account\")", err, org)
+		}
 		return 0, err
 	}
 	for _, g := range out.RunnerGroups {

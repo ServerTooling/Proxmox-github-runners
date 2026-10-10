@@ -283,6 +283,14 @@ func (s *Server) appInstalled(w http.ResponseWriter, r *http.Request) {
 func (s *Server) addTarget(ctx context.Context, c *github.Client, a appState, in github.Installation) error {
 	t := config.Target{AppID: a.ID, AppSlug: a.Slug, InstallationID: in.ID, Pools: []string{"default"},
 		PrivateKeyFile: filepath.Join(s.KeyDir, strings.ToLower(a.Owner)+".pem")}
+	// The org App asks for org runner permissions, which mean nothing on a personal account (and
+	// the reverse lacks them), so the account type must match the button that was used.
+	if a.Org && in.Account.Type == "User" {
+		return fmt.Errorf("%s is a personal account, not an org; remove this App and use \"Create App for my account\" instead", in.Account.Login)
+	}
+	if !a.Org && in.Account.Type == "Organization" {
+		return fmt.Errorf("%s is an org; remove this App and use \"Create App for org\" instead", in.Account.Login)
+	}
 	if a.Org {
 		t.Org = in.Account.Login
 	} else {

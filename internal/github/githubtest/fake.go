@@ -155,7 +155,13 @@ func (f *Fake) serve(w http.ResponseWriter, r *http.Request) {
 		write(w, 200, map[string]any{"full_name": name, "private": vis != "public", "visibility": vis})
 	case r.Method == "GET" && strings.HasSuffix(path, "/actions/runner-groups"):
 		org := strings.Split(path, "/")[2]
-		write(w, 200, map[string]any{"runner_groups": f.RunnerGroups[org]})
+		groups, ok := f.RunnerGroups[org]
+		if !ok {
+			// Like GitHub for a name that isn't an org (a personal account, or a typo).
+			write(w, 404, map[string]any{"message": "Not Found"})
+			return
+		}
+		write(w, 200, map[string]any{"runner_groups": groups})
 	case r.Method == "POST" && strings.HasSuffix(path, "/actions/runners/registration-token"):
 		f.mu.Lock()
 		f.RegTokens = append(f.RegTokens, path)

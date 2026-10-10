@@ -149,6 +149,26 @@ func TestPersonalAccountKeepsOnlyPrivateRepos(t *testing.T) {
 	}
 }
 
+func TestOrgAppOnPersonalAccountIsRefused(t *testing.T) {
+	gh := githubtest.New(42)
+	defer gh.Close()
+	gh.ManifestCodes["c"] = true
+	gh.Installations = []map[string]any{{"id": 5, "account": map[string]string{"login": "example-org", "type": "User"}}}
+	dir := t.TempDir()
+	s, _ := NewServer(config.Default(), filepath.Join(dir, "c.yaml"))
+	s.KeyDir, s.API = dir, gh.URL
+	srv := httptest.NewServer(s.Handler())
+	defer srv.Close()
+	c := client(t)
+	c.Get(srv.URL + "/?t=" + s.Token)
+	c.PostForm(srv.URL+"/app/new", url.Values{"org": {"example-org"}})
+	c.Get(srv.URL + "/app/created?code=c&state=" + s.Token)
+	c.Get(srv.URL + "/app/installed?installation_id=5")
+	if len(s.Cfg.Targets) != 0 || !strings.Contains(s.errMsg, "example-org is a personal account") {
+		t.Fatalf("targets %+v, error %q", s.Cfg.Targets, s.errMsg)
+	}
+}
+
 func TestOrderAddrsPutsWebUIAddressFirst(t *testing.T) {
 	got := OrderAddrs([]string{"198.51.100.1", "192.0.2.10", "203.0.113.5"}, []string{"192.0.2.10", "192.0.2.99", "203.0.113.5"})
 	want := []string{"192.0.2.10", "203.0.113.5", "198.51.100.1"}
