@@ -137,6 +137,30 @@ func TestGenerateJIT(t *testing.T) {
 	}
 }
 
+func TestGenerateJITReplacesStaleRunner(t *testing.T) {
+	f := scalesettest.New()
+	defer f.Close()
+	// A runner whose container crashed before taking a job is still registered under the reused name.
+	f.AddRunner("gh-pve1-default-9000", 55)
+	jit, err := newClient(f).GenerateJIT(context.Background(), 4, "gh-pve1-default-9000", "_work")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if jit.Runner.Name != "gh-pve1-default-9000" || jit.Runner.ID == 55 {
+		t.Errorf("jit = %+v", jit)
+	}
+	if got := f.Removed(); len(got) != 1 || got[0] != 55 {
+		t.Errorf("removed = %v", got)
+	}
+	gets := f.CallsTo("GET", "/svc/_apis/runtime/runners")
+	if len(gets) != 1 || !strings.Contains(gets[0].Query, "agentName=gh-pve1-default-9000") {
+		t.Errorf("lookups = %+v", gets)
+	}
+	if n := len(f.CallsTo("POST", "/svc/_apis/runtime/runnerscalesets/4/generatejitconfig")); n != 2 {
+		t.Errorf("generatejitconfig calls = %d, want 2", n)
+	}
+}
+
 func openSession(t *testing.T, f *scalesettest.Fake) (*Client, *Session) {
 	t.Helper()
 	c := newClient(f)

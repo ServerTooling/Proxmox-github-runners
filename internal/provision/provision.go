@@ -224,11 +224,16 @@ func (p *Provisioner) Spawn(ctx context.Context, req Request) (res *Result, err 
 	if err = p.pushSecret(ctx, id, jit.EncodedJITConfig, "/etc/gh-runner/jitconfig"); err != nil {
 		return nil, err
 	}
-	if err = p.Host.Exec(ctx, pve.LXCExec(id, "systemctl", "start", "gh-runner.service")); err != nil {
+	if err = p.Host.Exec(ctx, pve.LXCExec(id, "sh", "-c", startRunner)); err != nil {
 		return nil, err
 	}
 	return &Result{VMID: id, Name: name, RunnerID: jit.Runner.ID, RunnerName: jit.Runner.Name}, nil
 }
+
+// startRunner waits for the guest to finish booting first: a start queued while boot jobs (such as
+// systemd-sysusers) are still settling is refused as a destructive transaction. A degraded or slow
+// boot still goes ahead after the wait, and the runner unit reports its own failures.
+const startRunner = "timeout 120 systemctl is-system-running --wait >/dev/null 2>&1; exec systemctl start gh-runner.service"
 
 func (p *Provisioner) jit(ctx context.Context, req Request, name string, labels []string) (*github.JITConfig, error) {
 	if req.JIT != nil {

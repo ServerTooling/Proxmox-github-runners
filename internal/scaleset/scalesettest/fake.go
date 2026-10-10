@@ -66,6 +66,8 @@ type Fake struct {
 	queue     []map[string]any
 	acquired  []int64
 	jit       []string
+	runners   map[string]int64 // registered runner name -> ID
+	removed   []int64
 	wake      chan struct{}
 	// Assigned is reported as totalAssignedJobs in session and message statistics.
 	Assigned int
@@ -73,7 +75,7 @@ type Fake struct {
 
 func New() *Fake {
 	f := &Fake{RegToken: "regtok", Groups: map[string]int64{}, PollWait: 20 * time.Millisecond,
-		sessions: map[string]int64{}, queueTok: QueueToken, wake: make(chan struct{}, 1)}
+		sessions: map[string]int64{}, runners: map[string]int64{}, queueTok: QueueToken, wake: make(chan struct{}, 1)}
 	f.Server = httptest.NewServer(http.HandlerFunc(f.serve))
 	return f
 }
@@ -140,6 +142,20 @@ func (f *Fake) JITNames() []string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return append([]string(nil), f.jit...)
+}
+
+// AddRunner registers a runner by name, as if an earlier container had taken it and never ran a job.
+func (f *Fake) AddRunner(name string, id int64) {
+	f.mu.Lock()
+	f.runners[name] = id
+	f.mu.Unlock()
+}
+
+// Removed lists the IDs of runners deleted through the agents endpoint.
+func (f *Fake) Removed() []int64 {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]int64(nil), f.removed...)
 }
 
 // Conflict makes the next n session creations fail with 409.
@@ -214,13 +230,28 @@ func (f *Fake) serve(w http.ResponseWriter, r *http.Request) {
 		f.serveQueue(w, r, rest)
 		return
 	}
+	if r.URL.Query().Get("api-version") != "6.0-preview" {
+		svcError(w, 400, "", "missing api-version")
+		return
+	}
+	if idStr, ok := strings.CutPrefix(r.URL.Path, "/svc/_apis/distributedtask/pools/0/agents/"); ok && r.Method == http.MethodDelete {
+		id, _ := strconv.ParseInt(idStr, 10, 64)
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		for name, rid := range f.runners {
+			if rid == id {
+				delete(f.runners, name)
+				f.removed = append(f.removed, id)
+				w.WriteHeader(http.StatusNoContent)
+				return
+			}
+		}
+		svcError(w, 404, "TaskAgentNotFoundException", "no such runner")
+		return
+	}
 	rest, ok := strings.CutPrefix(r.URL.Path, "/svc/_apis/runtime/")
 	if !ok {
 		http.NotFound(w, r)
-		return
-	}
-	if r.URL.Query().Get("api-version") != "6.0-preview" {
-		svcError(w, 400, "", "missing api-version")
 		return
 	}
 	// acquirejobs is the one service call made with the queue token.
@@ -262,11 +293,26 @@ func (f *Fake) serve(w http.ResponseWriter, r *http.Request) {
 		s.ID = int64(len(f.scaleSets) + 1)
 		f.scaleSets = append(f.scaleSets, &s)
 		writeJSON(w, 200, s)
+	case parts[0] == "runners" && r.Method == http.MethodGet:
+		name := r.URL.Query().Get("agentName")
+		id, ok := f.runners[name]
+		if !ok {
+			writeJSON(w, 200, map[string]any{"count": 0, "value": []any{}})
+			return
+		}
+		writeJSON(w, 200, map[string]any{"count": 1, "value": []any{map[string]any{"id": id, "name": name}}})
 	case parts[0] == "runnerscalesets" && len(parts) == 3 && parts[2] == "generatejitconfig":
 		var req struct{ Name string }
 		json.Unmarshal(body, &req)
+		if _, ok := f.runners[req.Name]; ok {
+			svcError(w, 409, "Microsoft.TeamFoundation.DistributedTask.WebApi.TaskAgentExistsException",
+				"A runner with the name "+req.Name+" already exists.")
+			return
+		}
 		f.jit = append(f.jit, req.Name)
-		writeJSON(w, 200, map[string]any{"runner": map[string]any{"id": 100 + len(f.jit), "name": req.Name},
+		id := int64(100 + len(f.jit))
+		f.runners[req.Name] = id
+		writeJSON(w, 200, map[string]any{"runner": map[string]any{"id": id, "name": req.Name},
 			"encodedJITConfig": "jit-" + req.Name})
 	case parts[0] == "runnerscalesets" && len(parts) == 3 && parts[2] == "sessions" && r.Method == http.MethodPost:
 		if f.conflicts > 0 {

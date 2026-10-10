@@ -63,7 +63,7 @@ func TestSpawnRunsExactSequence(t *testing.T) {
 		"pvesh create /nodes/pve1/lxc/9000/firewall/rules --type group --action gh-runner-egress --enable 1",
 		"pct start 9000",
 		push,
-		"pct exec 9000 -- systemctl start gh-runner.service",
+		"pct exec 9000 -- sh -c timeout 120 systemctl is-system-running --wait >/dev/null 2>&1; exec systemctl start gh-runner.service",
 	}
 	if !reflect.DeepEqual(m, want) {
 		t.Fatalf("commands\n got %q\nwant %q", m, want)
