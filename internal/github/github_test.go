@@ -1,0 +1,126 @@
+package github_test
+
+import (
+	"context"
+	"errors"
+	"net/http"
+	"reflect"
+	"testing"
+
+	"github.com/ServerTooling/proxmox-github-runners/internal/github"
+	"github.com/ServerTooling/proxmox-github-runners/internal/github/githubtest"
+)
+
+func TestParsePrivateKeyRoundTrip(t *testing.T) {
+	k := githubtest.GenerateKey()
+	got, err := github.ParsePrivateKey(githubtest.KeyPEM(k))
+	if err != nil || !got.Equal(k) {
+		t.Fatalf("round trip failed: %v", err)
+	}
+	if _, err := github.ParsePrivateKey([]byte("nope")); err == nil {
+		t.Fatal("expected error for non-PEM")
+	}
+}
+
+func TestOrgJITConfigSendsExactBody(t *testing.T) {
+	f := githubtest.New(42)
+	defer f.Close()
+	f.RunnerGroups["example-org"] = []map[string]any{{"id": 7, "name": "proxmox"}}
+	c := github.NewClient(f.URL, 42, f.Key)
+	ctx := context.Background()
+
+	gid, err := c.RunnerGroupID(ctx, 5, "example-org", "Proxmox")
+	if err != nil || gid != 7 {
+		t.Fatalf("group: %d %v", gid, err)
+	}
+	jit, err := c.OrgJITConfig(ctx, 5, "example-org", github.JITRequest{
+		Name: "gh-lxc-9001", RunnerGroupID: gid, Labels: []string{"proxmox", "lxc-small"}, WorkFolder: "_work"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if jit.EncodedJITConfig == "" || jit.Runner.ID == 0 {
+		t.Fatalf("empty jit: %+v", jit)
+	}
+	got := f.JITRequests[0]
+	if got.Path != "/orgs/example-org/actions/runners/generate-jitconfig" {
+		t.Fatalf("path %s", got.Path)
+	}
+	want := map[string]any{"name": "gh-lxc-9001", "runner_group_id": float64(7),
+		"labels": []any{"proxmox", "lxc-small"}, "work_folder": "_work"}
+	if !reflect.DeepEqual(got.Body, want) {
+		t.Fatalf("body\n got %v\nwant %v", got.Body, want)
+	}
+}
+
+func TestPublicReposAndGroupsAreRefused(t *testing.T) {
+	f := githubtest.New(42)
+	defer f.Close()
+	f.RunnerGroups["example-org"] = []map[string]any{
+		{"id": 1, "name": "Default", "allows_public_repositories": false},
+		{"id": 9, "name": "open", "allows_public_repositories": true}}
+	f.RepoVisibility["someone/oss"] = "public"
+	c := github.NewClient(f.URL, 42, f.Key)
+	ctx := context.Background()
+	if id, err := c.RunnerGroupID(ctx, 5, "example-org", ""); err != nil || id != 1 {
+		t.Fatalf("default group: %d %v", id, err)
+	}
+	if _, err := c.RunnerGroupID(ctx, 5, "example-org", "open"); !errors.Is(err, github.ErrPublicRepo) {
+		t.Fatalf("got %v", err)
+	}
+	if _, err := c.RepoJITConfig(ctx, 5, "someone", "oss", github.JITRequest{Name: "r"}); !errors.Is(err, github.ErrPublicRepo) {
+		t.Fatalf("got %v", err)
+	}
+	if len(f.JITRequests) != 0 {
+		t.Fatal("no runner may be registered for a public repo")
+	}
+}
+
+func TestRepoJITConfigForcesDefaultGroup(t *testing.T) {
+	f := githubtest.New(42)
+	defer f.Close()
+	f.RepoVisibility["someone/side-project"] = "private"
+	c := github.NewClient(f.URL, 42, f.Key)
+	if _, err := c.RepoJITConfig(context.Background(), 5, "someone", "side-project",
+		github.JITRequest{Name: "r", RunnerGroupID: 99, Labels: []string{"x"}, WorkFolder: "_work"}); err != nil {
+		t.Fatal(err)
+	}
+	got := f.JITRequests[0]
+	if got.Path != "/repos/someone/side-project/actions/runners/generate-jitconfig" || got.Body["runner_group_id"] != float64(1) {
+		t.Fatalf("got %+v", got)
+	}
+}
+
+func TestWrongKeyIsRejectedAsAuthError(t *testing.T) {
+	f := githubtest.New(42)
+	defer f.Close()
+	c := github.NewClient(f.URL, 42, githubtest.GenerateKey())
+	_, err := c.Installations(context.Background())
+	var apiErr *github.APIError
+	if !errors.As(err, &apiErr) || apiErr.Status != 401 {
+		t.Fatalf("want 401 APIError, got %v", err)
+	}
+}
+
+func TestInstallationTokenIsCached(t *testing.T) {
+	f := githubtest.New(42)
+	defer f.Close()
+	c := github.NewClient(f.URL, 42, f.Key)
+	a, _ := c.InstallationToken(context.Background(), 5)
+	b, _ := c.InstallationToken(context.Background(), 5)
+	if a == "" || a != b {
+		t.Fatalf("token not cached: %q %q", a, b)
+	}
+}
+
+func TestConvertManifestIsSingleUse(t *testing.T) {
+	f := githubtest.New(42)
+	defer f.Close()
+	f.ManifestCodes["abc"] = true
+	creds, err := github.ConvertManifest(context.Background(), http.DefaultClient, f.URL, "abc")
+	if err != nil || creds.ID != 42 || creds.Slug != "pve-runners-test" || creds.PEM == "" {
+		t.Fatalf("got %+v %v", creds, err)
+	}
+	if _, err := github.ConvertManifest(context.Background(), http.DefaultClient, f.URL, "abc"); err == nil {
+		t.Fatal("second conversion should fail")
+	}
+}

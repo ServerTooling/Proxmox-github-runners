@@ -1,0 +1,6 @@
+/dist/
+/pve-runners
+*.pem
+*.key
+config.yaml
+!packaging/config.example.yaml
