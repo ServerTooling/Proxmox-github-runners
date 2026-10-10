@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"regexp"
 	"strings"
 	"sync/atomic"
@@ -63,7 +64,7 @@ func TestImageButtonsWaitForTheRunLoopsSync(t *testing.T) {
 		if a.Name != "images-pull" && a.Name != "images-prune" {
 			continue
 		}
-		err := a.Run(t.Context(), &strings.Builder{}, nil)
+		err := a.Run(context.Background(), &strings.Builder{}, nil)
 		if err == nil || !strings.Contains(err.Error(), "already running") {
 			t.Errorf("%s while a sync runs: %v", a.Name, err)
 		}
