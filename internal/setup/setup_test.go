@@ -72,7 +72,7 @@ func TestFullSetupFlowForAnOrg(t *testing.T) {
 		t.Fatalf("hand-made template: %+v", p)
 	}
 	// Leaving the template empty switches the pool to the published image.
-	c.PostForm(srv.URL+"/host", url.Values{"node": {"pve1"}, "template": {""}, "max_runners": {"4"}})
+	c.PostForm(srv.URL+"/host", url.Values{"node": {"pve1"}, "template": {""}, "max_runners": {"4"}, "bridge": {"vmbr4"}})
 
 	resp, _ := c.PostForm(srv.URL+"/app/new", url.Values{"org": {"example-org"}})
 	body, _ := io.ReadAll(resp.Body)
@@ -114,7 +114,7 @@ func TestFullSetupFlowForAnOrg(t *testing.T) {
 	}
 	tg := got.Targets[0]
 	if tg.Org != "example-org" || tg.AppID != 42 || tg.InstallationID != 77 || got.Pools["default"].Template != 0 ||
-		got.Pools["default"].Image != "ubuntu-latest" ||
+		got.Pools["default"].Image != "ubuntu-latest" || got.Proxmox.Bridge != "vmbr4" || got.Pools["default"].Bridge != "vmbr4" ||
 		got.Pools["default"].Labels[0] != "proxmox" || got.Proxmox.Node != "pve1" {
 		t.Fatalf("config: %+v %+v", tg, got.Pools["default"])
 	}

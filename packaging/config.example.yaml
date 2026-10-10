@@ -11,6 +11,7 @@ proxmox:
   pool: gh-runners
   storage: local-lvm               # template root disks and full clones
   min_free_memory_mb: 2048         # never start a runner that would leave less than this free
+  bridge: vmbr0                    # bridge runner NICs attach to (firewall on); pools may override
 
 network:
   isolate: true                    # internet yes, LAN no (needs the datacenter firewall on)
@@ -41,7 +42,7 @@ pools:
     memory_mb: 8192
     disk_gb: 40
     # max_lifetime: 6h             # destroy runners older than this
-    # bridge: vmbr1                # bridge for the runner NIC (default vmbr0), and an optional VLAN
+    # bridge: vmbr4                # override proxmox.bridge for this pool, and an optional VLAN
     # vlan: 50
 
 images:

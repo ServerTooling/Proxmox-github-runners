@@ -131,7 +131,7 @@ func TestImagePools(t *testing.T) {
 		t.Fatal(err)
 	}
 	if c.Images.Repo != c.Update.Repo || c.Images.VMIDRange != [2]int{8900, 8999} || c.Images.CacheStorage != "local" ||
-		c.Images.RootfsGB != 16 || c.Images.CheckInterval != 6*time.Hour || c.Pools["small"].Bridge != "vmbr0" {
+		c.Images.RootfsGB != 16 || c.Images.CheckInterval != 6*time.Hour || c.Pools["small"].Bridge != "vmbr0" || c.Proxmox.Bridge != "vmbr0" {
 		t.Fatalf("image defaults not applied: %+v %+v", c.Images, c.Pools["small"])
 	}
 	for doc, want := range map[string]string{
@@ -147,5 +147,21 @@ func TestImagePools(t *testing.T) {
 	}
 	if _, _, err := Parse([]byte(strings.Replace(valid, "template: 8000", "image: ubuntu-latest@template-ubuntu-latest-20261012-5", 1))); err != nil {
 		t.Fatalf("pinned image: %v", err)
+	}
+}
+
+func TestBridgeIsHostWideWithPoolOverride(t *testing.T) {
+	doc := strings.Replace(valid, "  node: pve1", "  node: pve1\n  bridge: vmbr4", 1) +
+		"  other:\n    template: 8001\n    bridge: vmbr7\n"
+	c, _, err := Parse([]byte(doc))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Pools["small"].Bridge != "vmbr4" || c.Pools["other"].Bridge != "vmbr7" {
+		t.Fatalf("bridges: small %q other %q", c.Pools["small"].Bridge, c.Pools["other"].Bridge)
+	}
+	if _, _, err := Parse([]byte(strings.Replace(valid, "  node: pve1", "  node: pve1\n  bridge: \"vmbr4; rm\"", 1))); err == nil ||
+		!strings.Contains(err.Error(), "proxmox.bridge") {
+		t.Fatalf("bad bridge accepted: %v", err)
 	}
 }

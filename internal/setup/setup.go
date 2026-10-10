@@ -156,6 +156,9 @@ func (s *Server) saveHost(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	s.Cfg.Proxmox.Node = strings.TrimSpace(r.FormValue("node"))
 	s.Cfg.Proxmox.MaxRunners = maxR
+	if b := strings.TrimSpace(r.FormValue("bridge")); b != "" {
+		s.Cfg.Proxmox.Bridge = b
+	}
 	p := s.Cfg.Pools["default"]
 	if p == nil {
 		p = &config.Pool{Type: "lxc", Mode: "ephemeral", Labels: []string{"proxmox"}}
@@ -370,6 +373,8 @@ var indexTmpl = template.Must(template.New("index").Parse(page + `
 <p><label>Runner template container ID <input name="template" value="{{if .Template}}{{.Template}}{{end}}" size="6" placeholder="optional"></label><br>
 <small>Leave empty to use the published <code>ubuntu-latest</code> image (Python, Go, Node, Helm, kubectl, Docker), which is downloaded automatically.
 Or enter a container you prepared with <code>pve-runners template prepare</code>, outside IDs {{index .Cfg.Proxmox.VMIDRange 0}}-{{index .Cfg.Proxmox.VMIDRange 1}}.</small></p>
+<p><label>Network bridge for runners <input name="bridge" value="{{.Cfg.Proxmox.Bridge}}" size="8"></label><br>
+<small>Runners get internet access through this bridge; the LAN stays blocked by the firewall.</small></p>
 <p><label>Max runners at once <input name="max_runners" value="{{.Cfg.Proxmox.MaxRunners}}" size="3"></label></p>
 <button>Save</button></fieldset></form>
 

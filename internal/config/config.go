@@ -52,6 +52,8 @@ type Proxmox struct {
 	Pool            string `yaml:"pool"`
 	Storage         string `yaml:"storage"`
 	MinFreeMemoryMB int    `yaml:"min_free_memory_mb"`
+	// Bridge is the network bridge runner NICs (and image templates) attach to; a pool can override it.
+	Bridge string `yaml:"bridge"`
 }
 
 type GitHub struct {
@@ -149,7 +151,8 @@ type Update struct {
 func Default() *Config {
 	return &Config{
 		Version: CurrentVersion,
-		Proxmox: Proxmox{MaxRunners: 4, VMIDRange: [2]int{9000, 9499}, Pool: "gh-runners", Storage: "local-lvm", MinFreeMemoryMB: 2048},
+		Proxmox: Proxmox{MaxRunners: 4, VMIDRange: [2]int{9000, 9499}, Pool: "gh-runners", Storage: "local-lvm", MinFreeMemoryMB: 2048,
+			Bridge: "vmbr0"},
 		GitHub: GitHub{
 			APIURL:        "https://api.github.com",
 			RunnerVersion: buildinfo.RunnerVersion,
@@ -187,6 +190,9 @@ func (c *Config) applyDefaults() {
 	}
 	if c.Proxmox.Storage == "" {
 		c.Proxmox.Storage = d.Proxmox.Storage
+	}
+	if c.Proxmox.Bridge == "" {
+		c.Proxmox.Bridge = d.Proxmox.Bridge
 	}
 	if c.GitHub.APIURL == "" {
 		c.GitHub.APIURL = d.GitHub.APIURL
@@ -259,7 +265,7 @@ func (c *Config) applyDefaults() {
 		}
 		// Always attach a NIC with the firewall flag so isolation holds whatever the template had.
 		if p.Bridge == "" {
-			p.Bridge = "vmbr0"
+			p.Bridge = c.Proxmox.Bridge
 		}
 	}
 }
@@ -344,7 +350,9 @@ func (c *Config) Save(path string) error {
 
 var (
 	labelRe = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
-	imageRe = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]*(@template-[a-z0-9._-]+)?$`)
+	// Linux interface names: at most 15 characters.
+	bridgeRe = regexp.MustCompile(`^[A-Za-z0-9_.-]{1,15}$`)
+	imageRe  = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]*(@template-[a-z0-9._-]+)?$`)
 )
 
 // Validate returns every problem at once so `config validate` can show them together.
@@ -358,6 +366,9 @@ func (c *Config) Validate() error {
 	lo, hi := c.Proxmox.VMIDRange[0], c.Proxmox.VMIDRange[1]
 	if lo < 100 || hi < lo {
 		add("proxmox.vmid_range must be [low, high] with 100 <= low <= high, got [%d, %d]", lo, hi)
+	}
+	if !bridgeRe.MatchString(c.Proxmox.Bridge) {
+		add("proxmox.bridge %q is not a valid bridge name", c.Proxmox.Bridge)
 	}
 	if c.Proxmox.MaxRunners < 1 || c.Proxmox.MaxRunners > hi-lo+1 {
 		add("proxmox.max_runners must be between 1 and the size of vmid_range (%d), got %d", hi-lo+1, c.Proxmox.MaxRunners)
@@ -418,6 +429,9 @@ func (c *Config) Validate() error {
 			add("pools.%s.template must be a guest ID (>= 100)", name)
 		case p.Template >= lo && p.Template <= hi:
 			add("pools.%s.template %d is inside vmid_range; templates must live outside it", name, p.Template)
+		}
+		if p.Bridge != "" && !bridgeRe.MatchString(p.Bridge) {
+			add("pools.%s.bridge %q is not a valid bridge name", name, p.Bridge)
 		}
 		if p.Min > p.Max {
 			add("pools.%s.min (%d) is larger than max (%d)", name, p.Min, p.Max)
