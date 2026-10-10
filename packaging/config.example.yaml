@@ -1,0 +1,54 @@
+# /etc/pve-runners/config.yaml (0600 root). `pve-runners setup` writes this for you; it is safe to
+# hand-edit afterwards. Reload with `systemctl reload pve-runners`. No secrets go in this file:
+# each GitHub App key lives in its own 0600 file under /etc/pve-runners/apps/.
+version: 1
+host_id: pve1                      # unique per Proxmox host; defaults to proxmox.node
+
+proxmox:
+  node: pve1
+  max_runners: 4                   # hard cap on runners on this host, across all pools and orgs
+  vmid_range: [9000, 9499]         # runner containers only; templates must live outside it
+  pool: gh-runners
+  storage: local-lvm               # only used for full clones
+  min_free_memory_mb: 2048         # never start a runner that would leave less than this free
+
+network:
+  isolate: true                    # internet yes, LAN no (needs the datacenter firewall on)
+  # allow:                         # LAN exceptions; default is DNS (53) and DHCP (67) only
+  #   - {dest: 192.0.2.1, proto: udp, port: 53}
+
+targets:                           # one per org (or personal account), each with its own private App
+  - org: example-org
+    app_id: 123456
+    installation_id: 111111
+    runner_group: ""               # "" = Default group; must not allow public repositories
+    pools: [default]
+  # - user: example-user           # personal account: repo-level runners for listed private repos
+  #   app_id: 234567
+  #   installation_id: 222222
+  #   repos: [example-repo]
+  #   pools: [default]
+
+pools:
+  default:
+    type: lxc
+    template: 8000                 # container ID made by `pve-runners template prepare --ctid 8000`
+    mode: ephemeral                # permanent is reserved for later
+    labels: [proxmox]              # workflows use `runs-on: proxmox`
+    cores: 4
+    memory_mb: 8192
+    disk_gb: 40
+    # max_lifetime: 6h             # destroy runners older than this
+    # bridge: vmbr1                # optional dedicated bridge / VLAN for runners
+    # vlan: 50
+
+images:
+  retention_days: 30               # for downloaded template images (coming in a later release)
+
+notify:
+  # webhook_url_file: /etc/pve-runners/notify-url   # ntfy, Discord or Slack URL; off by default
+
+update:
+  enabled: true
+  channel: edge                    # edge = every build from main | stable = v* tags only
+  interval: 15m

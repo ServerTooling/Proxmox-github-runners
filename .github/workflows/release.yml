@@ -1,0 +1,91 @@
+name: Release
+
+# Every push to main publishes a build-<n> release that installed hosts pick up on the edge channel.
+# Pushing a v* tag publishes a stable release. Hosts verify the signature on SHA256SUMS before
+# installing, so the signing key secret is required.
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      UPDATE_SIGNING_KEY: ${{ secrets.UPDATE_SIGNING_KEY }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: go vet ./...
+      - run: go test ./...
+      - name: Privacy scan (source)
+        run: scripts/privacy-scan.sh
+
+      - name: Check signing key
+        run: |
+          if [ -z "$UPDATE_SIGNING_KEY" ]; then
+            echo "::error::Repository secret UPDATE_SIGNING_KEY is missing; see README > Releases. Nothing was published."
+            exit 1
+          fi
+          echo "PUBKEY=$(go run ./tools/sign pubkey)" >> "$GITHUB_ENV"
+
+      - name: Release tag
+        run: |
+          if [ "${GITHUB_REF_TYPE}" = tag ]; then TAG="${GITHUB_REF_NAME}"; else TAG="build-${GITHUB_RUN_NUMBER}"; fi
+          echo "TAG=$TAG" >> "$GITHUB_ENV"
+
+      - name: Pin and verify actions/runner
+        run: |
+          RV=$(tr -d ' \n' < packaging/runner-version)
+          echo "RUNNER_VERSION=$RV" >> "$GITHUB_ENV"
+          notes=$(gh api "repos/actions/runner/releases/tags/v$RV" --jq .body)
+          for pair in amd64:x64 arm64:arm64; do
+            goarch=${pair%%:*}; rarch=${pair##*:}
+            curl -fsSL -o runner.tgz "https://github.com/actions/runner/releases/download/v$RV/actions-runner-linux-$rarch-$RV.tar.gz"
+            sha=$(sha256sum runner.tgz | cut -d' ' -f1)
+            # Cross-check against the hash GitHub publishes in the release notes.
+            grep -q "$sha" <<<"$notes" || { echo "::error::actions/runner $RV linux-$rarch hash not in its release notes"; exit 1; }
+            echo "RUNNER_SHA_$goarch=$sha" >> "$GITHUB_ENV"
+          done
+          rm -f runner.tgz
+
+      - name: Build
+        run: |
+          mkdir -p dist
+          for arch in amd64 arm64; do
+            sha_var="RUNNER_SHA_$arch"
+            CGO_ENABLED=0 GOOS=linux GOARCH=$arch go build -trimpath \
+              -ldflags "-s -w \
+                -X github.com/ServerTooling/proxmox-github-runners/internal/buildinfo.Version=$TAG \
+                -X github.com/ServerTooling/proxmox-github-runners/internal/buildinfo.UpdatePublicKey=$PUBKEY \
+                -X github.com/ServerTooling/proxmox-github-runners/internal/buildinfo.RunnerVersion=$RUNNER_VERSION \
+                -X github.com/ServerTooling/proxmox-github-runners/internal/buildinfo.RunnerSHA256=${!sha_var}" \
+              -o dist/pve-runners-linux-$arch ./cmd/pve-runners
+          done
+          cp install.sh dist/
+          (cd dist && sha256sum pve-runners-linux-amd64 pve-runners-linux-arm64 install.sh > SHA256SUMS)
+          go run ./tools/sign sign dist/SHA256SUMS
+
+      - name: Privacy scan (release files)
+        run: scripts/privacy-scan.sh dist
+
+      - name: Publish
+        run: |
+          if [ "${GITHUB_REF_TYPE}" = tag ]; then
+            notes="Stable release $TAG."
+          else
+            notes="Build from main at ${GITHUB_SHA::7}. Hosts on the edge channel install this automatically."
+          fi
+          gh release create "$TAG" dist/* --target "$GITHUB_SHA" --title "$TAG" --notes "$notes" --latest
