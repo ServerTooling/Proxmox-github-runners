@@ -202,7 +202,7 @@ autoscale:
 
 cache:
   # Host folder for pools with cache: true, one subfolder per org or account, mounted in runners at
-  # /opt/pve-cache. Holds the actions tool cache (setup-node, setup-go, ...), npm, yarn, pnpm, Go, pip
+  # /opt/pve-cache. Holds the actions tool cache (setup-node, setup-go, ...), npm, yarn, Go, pip
   # and Playwright downloads. Every repo of an owner shares it, so only enable it for repos you trust.
   dir: {{q .Cache.Dir}}
   # A subfolder bigger than this is emptied once none of its runners are running.
@@ -254,6 +254,9 @@ logs:
   # token_file: /etc/pve-runners/loki-token
 {{- end}}
   interval: {{dur .Logs.Interval}}
+  # Also send each runner's CPU, memory, disk and network use every interval, labelled with its repo
+  # and job ({service="pve-runners-usage"}), so usage can be broken down per build.
+  usage: {{.Logs.UsageWanted}}
 
 web:
   # Settings page served by the service at https://<this host>:<port>, with the Proxmox UI's

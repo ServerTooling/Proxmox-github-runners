@@ -476,6 +476,8 @@ type Job struct {
 	RepositoryName  string `json:"repositoryName"`
 	OwnerName       string `json:"ownerName"`
 	JobWorkflowRef  string `json:"jobWorkflowRef"`
+	JobDisplayName  string `json:"jobDisplayName"`
+	WorkflowRunID   int64  `json:"workflowRunId"`
 	EventName       string `json:"eventName"`
 	RunnerName      string `json:"runnerName,omitempty"`
 	Result          string `json:"result,omitempty"`

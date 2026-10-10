@@ -1,0 +1,461 @@
+{
+  "title": "pve-runners: runner usage",
+  "uid": "pve-runners-usage",
+  "tags": [
+    "pve-runners"
+  ],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "refresh": "30s",
+  "time": {
+    "from": "now-6h",
+    "to": "now"
+  },
+  "templating": {
+    "list": [
+      {
+        "name": "datasource",
+        "type": "datasource",
+        "query": "loki",
+        "label": "Loki"
+      },
+      {
+        "name": "host",
+        "type": "query",
+        "label": "Host",
+        "datasource": {
+          "type": "loki",
+          "uid": "${datasource}"
+        },
+        "query": {
+          "label": "host",
+          "stream": "{service=\"pve-runners-usage\"}",
+          "type": 1
+        },
+        "includeAll": true,
+        "allValue": ".*",
+        "multi": true,
+        "refresh": 2,
+        "current": {
+          "text": "All",
+          "value": "$__all"
+        }
+      },
+      {
+        "name": "repo",
+        "type": "query",
+        "label": "Repo",
+        "datasource": {
+          "type": "loki",
+          "uid": "${datasource}"
+        },
+        "query": {
+          "label": "repo",
+          "stream": "{service=\"pve-runners-usage\"}",
+          "type": 1
+        },
+        "includeAll": true,
+        "allValue": ".*",
+        "multi": true,
+        "refresh": 2,
+        "current": {
+          "text": "All",
+          "value": "$__all"
+        }
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "timeseries",
+      "title": "CPU cores in use",
+      "datasource": {
+        "type": "loki",
+        "uid": "${datasource}"
+      },
+      "interval": "30s",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 0
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "custom": {
+            "fillOpacity": 10,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max by (runner) (max_over_time({service=\"pve-runners-usage\", host=~\"$host\", repo=~\"$repo\"} | json | unwrap cpu_cores [$__interval]))",
+          "legendFormat": "{{runner}}",
+          "queryType": "range",
+          "datasource": {
+            "type": "loki",
+            "uid": "${datasource}"
+          }
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "Memory in use",
+      "datasource": {
+        "type": "loki",
+        "uid": "${datasource}"
+      },
+      "interval": "30s",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 0
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "custom": {
+            "fillOpacity": 10,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max by (runner) (max_over_time({service=\"pve-runners-usage\", host=~\"$host\", repo=~\"$repo\"} | json | unwrap mem_bytes [$__interval]))",
+          "legendFormat": "{{runner}}",
+          "queryType": "range",
+          "datasource": {
+            "type": "loki",
+            "uid": "${datasource}"
+          }
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "Disk used",
+      "datasource": {
+        "type": "loki",
+        "uid": "${datasource}"
+      },
+      "interval": "30s",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "custom": {
+            "fillOpacity": 10,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max by (runner) (max_over_time({service=\"pve-runners-usage\", host=~\"$host\", repo=~\"$repo\"} | json | unwrap disk_bytes [$__interval]))",
+          "legendFormat": "{{runner}}",
+          "queryType": "range",
+          "datasource": {
+            "type": "loki",
+            "uid": "${datasource}"
+          }
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "Network",
+      "datasource": {
+        "type": "loki",
+        "uid": "${datasource}"
+      },
+      "interval": "30s",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "Bps",
+          "custom": {
+            "fillOpacity": 10,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max by (runner) (max_over_time({service=\"pve-runners-usage\", host=~\"$host\", repo=~\"$repo\"} | json | unwrap net_in_bps [$__interval]))",
+          "legendFormat": "{{runner}} in",
+          "queryType": "range",
+          "datasource": {
+            "type": "loki",
+            "uid": "${datasource}"
+          }
+        },
+        {
+          "refId": "B",
+          "expr": "max by (runner) (max_over_time({service=\"pve-runners-usage\", host=~\"$host\", repo=~\"$repo\"} | json | unwrap net_out_bps [$__interval]))",
+          "legendFormat": "{{runner}} out",
+          "queryType": "range",
+          "datasource": {
+            "type": "loki",
+            "uid": "${datasource}"
+          }
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "Disk I/O",
+      "datasource": {
+        "type": "loki",
+        "uid": "${datasource}"
+      },
+      "interval": "30s",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 16
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "Bps",
+          "custom": {
+            "fillOpacity": 10,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max by (runner) (max_over_time({service=\"pve-runners-usage\", host=~\"$host\", repo=~\"$repo\"} | json | unwrap disk_read_bps [$__interval]))",
+          "legendFormat": "{{runner}} read",
+          "queryType": "range",
+          "datasource": {
+            "type": "loki",
+            "uid": "${datasource}"
+          }
+        },
+        {
+          "refId": "B",
+          "expr": "max by (runner) (max_over_time({service=\"pve-runners-usage\", host=~\"$host\", repo=~\"$repo\"} | json | unwrap disk_write_bps [$__interval]))",
+          "legendFormat": "{{runner}} write",
+          "queryType": "range",
+          "datasource": {
+            "type": "loki",
+            "uid": "${datasource}"
+          }
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "type": "table",
+      "title": "Per job (selected time range)",
+      "datasource": {
+        "type": "loki",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 10,
+        "w": 12,
+        "x": 12,
+        "y": 16
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max by (repo, job, run_id, runner) (max_over_time({service=\"pve-runners-usage\", host=~\"$host\", repo=~\"$repo\"} | json | job != \"\" | unwrap cpu_cores [$__range]))",
+          "queryType": "instant",
+          "legendFormat": "",
+          "datasource": {
+            "type": "loki",
+            "uid": "${datasource}"
+          }
+        },
+        {
+          "refId": "B",
+          "expr": "max by (repo, job, run_id, runner) (avg_over_time({service=\"pve-runners-usage\", host=~\"$host\", repo=~\"$repo\"} | json | job != \"\" | unwrap cpu_cores [$__range]))",
+          "queryType": "instant",
+          "legendFormat": "",
+          "datasource": {
+            "type": "loki",
+            "uid": "${datasource}"
+          }
+        },
+        {
+          "refId": "C",
+          "expr": "max by (repo, job, run_id, runner) (max_over_time({service=\"pve-runners-usage\", host=~\"$host\", repo=~\"$repo\"} | json | job != \"\" | unwrap mem_bytes [$__range]))",
+          "queryType": "instant",
+          "legendFormat": "",
+          "datasource": {
+            "type": "loki",
+            "uid": "${datasource}"
+          }
+        },
+        {
+          "refId": "D",
+          "expr": "max by (repo, job, run_id, runner) (max_over_time({service=\"pve-runners-usage\", host=~\"$host\", repo=~\"$repo\"} | json | job != \"\" | unwrap disk_bytes [$__range]))",
+          "queryType": "instant",
+          "legendFormat": "",
+          "datasource": {
+            "type": "loki",
+            "uid": "${datasource}"
+          }
+        }
+      ],
+      "transformations": [
+        {
+          "id": "merge",
+          "options": {}
+        },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true
+            },
+            "renameByName": {
+              "repo": "Repo",
+              "job": "Job",
+              "run_id": "Run",
+              "runner": "Runner",
+              "Value #A": "Peak CPU cores",
+              "Value #B": "Avg CPU cores",
+              "Value #C": "Peak memory",
+              "Value #D": "Peak disk"
+            }
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Peak memory"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "bytes"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Peak disk"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "bytes"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Avg CPU cores"
+            },
+            "properties": [
+              {
+                "id": "decimals",
+                "value": 2
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "showHeader": true,
+        "sortBy": [
+          {
+            "displayName": "Peak memory",
+            "desc": true
+          }
+        ]
+      }
+    }
+  ]
+}

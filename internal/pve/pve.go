@@ -189,6 +189,19 @@ type Guest struct {
 	Template int    `json:"template"`
 	Pool     string `json:"pool"`
 	RawTags  string `json:"tags"`
+
+	// Usage as pvestatd last sampled it: CPU is the share of MaxCPU cores in use; the byte counters
+	// for network and disk I/O count up from the guest's start.
+	CPU       float64 `json:"cpu"`
+	MaxCPU    float64 `json:"maxcpu"`
+	Mem       int64   `json:"mem"`
+	MaxMem    int64   `json:"maxmem"`
+	Disk      int64   `json:"disk"`
+	MaxDisk   int64   `json:"maxdisk"`
+	NetIn     int64   `json:"netin"`
+	NetOut    int64   `json:"netout"`
+	DiskRead  int64   `json:"diskread"`
+	DiskWrite int64   `json:"diskwrite"`
 }
 
 func (g Guest) Tags() []string {

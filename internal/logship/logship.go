@@ -41,9 +41,14 @@ type Shipper struct {
 	HostID string
 	HTTP   *http.Client
 	Now    func() time.Time
+	// Usage also sends each running runner's resource use (see usage.go); Jobs names the job a runner
+	// is running, when known.
+	Usage bool
+	Jobs  func(runner string) (Job, bool)
 
 	mu      sync.Mutex
 	cursors map[string]string // source ("service" or a VMID) -> journal cursor of the last line read
+	prev    map[int]counters  // usage: each guest's previous I/O counters
 }
 
 type stream struct {
@@ -112,6 +117,9 @@ func (s *Shipper) Once(ctx context.Context) error {
 		// normal, so it is skipped quietly and tried again next round.
 		_ = read(key, pve.RunnerJournalCmd(g.VMID, s.cursors[key], Batch), map[string]string{"service": "pve-runners",
 			"host": s.HostID, "unit": "gh-runner", "vmid": key, "runner": g.Name, "pool": g.TagValue("pool")})
+	}
+	if s.Usage && err == nil {
+		streams = append(streams, s.usage(runners)...)
 	}
 	if len(streams) > 0 {
 		if err := s.push(ctx, streams); err != nil {
