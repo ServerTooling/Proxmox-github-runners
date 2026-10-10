@@ -87,9 +87,10 @@ func (t Target) Owner() string {
 }
 
 type Pool struct {
-	Type        string        `yaml:"type"` // lxc | vm (vm arrives in a later phase)
-	Template    int           `yaml:"template"`
-	Mode        string        `yaml:"mode"` // ephemeral | permanent
+	Type        string        `yaml:"type"`               // lxc | vm (vm arrives in a later phase)
+	Template    int           `yaml:"template,omitempty"` // a template container prepared by hand, or
+	Image       string        `yaml:"image,omitempty"`    // a published image: name, or name@release-tag to pin
+	Mode        string        `yaml:"mode"`               // ephemeral | permanent
 	Labels      []string      `yaml:"labels"`
 	Cores       int           `yaml:"cores"`
 	MemoryMB    int           `yaml:"memory_mb"`
@@ -119,11 +120,22 @@ type Notify struct {
 	Format         string `yaml:"format,omitempty"` // auto | ntfy | discord | slack
 }
 
-// Images controls template images downloaded from GitHub releases. Runner containers are destroyed
-// as soon as their job ends; images are kept and only aged out by RetentionDays. An image a pool
-// still uses, and the newest image of each name, are never deleted regardless of age.
+// Images controls template images downloaded from GitHub releases (see templates/ in this repo).
+// Runner containers are destroyed as soon as their job ends; images are kept and only aged out by
+// RetentionDays. The newest image of each name, pinned images, and images that runners were cloned
+// from are never deleted regardless of age.
 type Images struct {
 	RetentionDays int `yaml:"retention_days"`
+	// Repo publishes the images; defaults to update.repo.
+	Repo string `yaml:"repo,omitempty"`
+	// VMIDRange holds the template containers made from images; it must not overlap proxmox.vmid_range.
+	VMIDRange [2]int `yaml:"vmid_range"`
+	// CacheStorage is the Proxmox storage whose vztmpl directory keeps downloaded archives.
+	CacheStorage string `yaml:"cache_storage"`
+	// RootfsGB is the template's root disk; runners grow it to their pool's disk_gb.
+	RootfsGB int `yaml:"rootfs_gb"`
+	// CheckInterval is how often the service looks for newer images and prunes old ones.
+	CheckInterval time.Duration `yaml:"check_interval"`
 }
 
 type Update struct {
@@ -143,8 +155,9 @@ func Default() *Config {
 			RunnerVersion: buildinfo.RunnerVersion,
 			RunnerSHA256:  buildinfo.RunnerSHA256,
 		},
-		Pools:  map[string]*Pool{},
-		Images: Images{RetentionDays: 30},
+		Pools: map[string]*Pool{},
+		Images: Images{RetentionDays: 30, VMIDRange: [2]int{8900, 8999}, CacheStorage: "local", RootfsGB: 16,
+			CheckInterval: 6 * time.Hour},
 		Network: Network{
 			Blocked: append([]string(nil), pve.DefaultBlocked...),
 			// Runners still need name resolution and DHCP leases, which at home usually come from
@@ -201,6 +214,21 @@ func (c *Config) applyDefaults() {
 	if c.Update.Repo == "" {
 		c.Update.Repo = d.Update.Repo
 	}
+	if c.Images.Repo == "" {
+		c.Images.Repo = c.Update.Repo
+	}
+	if c.Images.VMIDRange == [2]int{} {
+		c.Images.VMIDRange = d.Images.VMIDRange
+	}
+	if c.Images.CacheStorage == "" {
+		c.Images.CacheStorage = d.Images.CacheStorage
+	}
+	if c.Images.RootfsGB == 0 {
+		c.Images.RootfsGB = d.Images.RootfsGB
+	}
+	if c.Images.CheckInterval == 0 {
+		c.Images.CheckInterval = d.Images.CheckInterval
+	}
 	for i := range c.Targets {
 		if c.Targets[i].PrivateKeyFile == "" && c.Targets[i].Owner() != "" {
 			c.Targets[i].PrivateKeyFile = KeyPath(c.Targets[i].Owner())
@@ -228,6 +256,10 @@ func (c *Config) applyDefaults() {
 		}
 		if p.Max == 0 {
 			p.Max = c.Proxmox.MaxRunners
+		}
+		// Always attach a NIC with the firewall flag so isolation holds whatever the template had.
+		if p.Bridge == "" {
+			p.Bridge = "vmbr0"
 		}
 	}
 }
@@ -310,7 +342,10 @@ func (c *Config) Save(path string) error {
 	return os.Rename(tmp, path)
 }
 
-var labelRe = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
+var (
+	labelRe = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
+	imageRe = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]*(@template-[a-z0-9._-]+)?$`)
+)
 
 // Validate returns every problem at once so `config validate` can show them together.
 func (c *Config) Validate() error {
@@ -343,6 +378,15 @@ func (c *Config) Validate() error {
 	if c.Images.RetentionDays < 1 {
 		add("images.retention_days must be at least 1, got %d", c.Images.RetentionDays)
 	}
+	ilo, ihi := c.Images.VMIDRange[0], c.Images.VMIDRange[1]
+	if ilo < 100 || ihi < ilo {
+		add("images.vmid_range must be [low, high] with 100 <= low <= high, got [%d, %d]", ilo, ihi)
+	} else if ilo <= hi && lo <= ihi {
+		add("images.vmid_range [%d, %d] overlaps proxmox.vmid_range [%d, %d]", ilo, ihi, lo, hi)
+	}
+	if c.Images.RootfsGB < 4 {
+		add("images.rootfs_gb must be at least 4, got %d", c.Images.RootfsGB)
+	}
 	if c.Update.Channel != "edge" && c.Update.Channel != "stable" {
 		add("update.channel must be edge or stable, got %q", c.Update.Channel)
 	}
@@ -361,9 +405,18 @@ func (c *Config) Validate() error {
 		default:
 			add("pools.%s.mode must be ephemeral or permanent", name)
 		}
-		if p.Template < 100 {
+		switch {
+		case (p.Template == 0) == (p.Image == ""):
+			add("pools.%s needs exactly one of image (a published template image) or template (a container ID)", name)
+		case p.Image != "":
+			if !imageRe.MatchString(p.Image) {
+				add("pools.%s.image %q must be a name like ubuntu-latest, optionally pinned as name@template-name-date-run", name, p.Image)
+			} else if p.DiskGB > 0 && p.DiskGB < c.Images.RootfsGB {
+				add("pools.%s.disk_gb (%d) is smaller than images.rootfs_gb (%d); Proxmox can't shrink disks", name, p.DiskGB, c.Images.RootfsGB)
+			}
+		case p.Template < 100:
 			add("pools.%s.template must be a guest ID (>= 100)", name)
-		} else if p.Template >= lo && p.Template <= hi {
+		case p.Template >= lo && p.Template <= hi:
 			add("pools.%s.template %d is inside vmid_range; templates must live outside it", name, p.Template)
 		}
 		if p.Min > p.Max {

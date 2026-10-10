@@ -125,16 +125,18 @@ Jobs need toolchains (Python, Go, Node/npm, Helm, kubectl, Docker, ...). Instead
 ```yaml
 name: ubuntu-latest
 base: ubuntu:24.04            # tracks GitHub's ubuntu-latest; bumped in a PR when GitHub moves it
-roles:                        # Ansible roles, each pinned to a version
-  - common                    # git, curl, jq, build-essential, unzip, zstd, ca-certificates
-  - python: {version: "3.12"} # plus pip, venv, pipx
-  - go: {version: "1.23.4"}
-  - node: {version: "22"}     # plus npm, corepack (yarn/pnpm)
-  - helm: {version: "3.16.3"}
-  - kubectl: {version: "1.31"}
-  - docker                    # needs nesting=1,keyctl=1 on the container
-  - actions-runner            # pinned runner + the one-job gh-runner.service
+roles: [base, common, python, go, node, helm, kubectl, docker, actions_runner]
+vars:                         # "latest"/"lts"/"stable" resolve at build time, or pin an exact version
+  go_version: latest
+  node_version: lts
+  helm_version: latest
+  kubectl_version: stable
+smoke:                        # per role; every command must pass before the image is published
+  go: [go version]
+  node: [node --version, npm --version]
+  actions_runner: [/opt/actions-runner/bin/Runner.Listener --version, systemctl is-enabled gh-runner.service]
 ```
+Every download in the roles is checked against its publisher's checksum, and the resolved versions are recorded in the release's `<name>-<arch>.json`.
 Adding a tool is a new role (or a version bump) in a PR: reviewable, repeatable, like Ansible because it *is* Ansible.
 
 **Build (`.github/workflows/templates.yml`)**, on changes under `templates/**`, weekly for security patches, and on demand:
@@ -315,8 +317,8 @@ update:
 - `pve-runners setup` (App manifest flow, install picker), `spawn`, `reconcile`, `status`, `template prepare`.
 - `install.sh`, CI with privacy scan, signed release workflow, self-updater with rollback, so every later phase installs itself.
 
-**Phase 2: template images**
-- `templates/` with Ansible roles, the `templates.yml` build/publish workflow, and host-side pull/verify/cache/`pct create`. Replaces manual template building.
+**Phase 2: template images (delivered)**
+- `templates/` with Ansible roles, `templates/build.sh`, the `templates.yml` build/publish workflow (PRs build and smoke-test; main, weekly and manual runs publish), and host-side pull/verify/cache/`pct create`/prune in `internal/images`. Setup defaults the pool to `image: ubuntu-latest`; `template prepare` stays for custom templates.
 
 **Phase 3: autoscaling**
 - Scale set listener per org and pool driving spawn; capacity limits; adopt-on-restart; structured logs.

@@ -38,8 +38,10 @@ type Provisioner struct {
 	Host *pve.Host
 	// GitHub returns the client for a target's own App (one private App per org or account).
 	GitHub func(config.Target) (JITSource, error)
-	Now    func() time.Time
-	TmpDir string
+	// Templates returns the template container for a pool's image, creating it if needed.
+	Templates func(ctx context.Context, image string) (int, error)
+	Now       func() time.Time
+	TmpDir    string
 }
 
 // Proxmox tags allow only [a-z0-9_+.-], so owner names are lowercased and anything else dropped.
@@ -53,10 +55,11 @@ func tagSafe(s string) string {
 	return b.String()
 }
 
-// Tags returns the tags a runner guest carries; reconcile and status read state back from them.
-func Tags(pool, owner, mode string, created time.Time) []string {
+// Tags returns the tags a runner guest carries; reconcile and status read state back from them, and
+// image pruning reads from-<template> to keep templates that runners were cloned from.
+func Tags(pool, owner, mode string, template int, created time.Time) []string {
 	return []string{pve.Tag, "pool-" + tagSafe(pool), "owner-" + tagSafe(owner), "mode-" + mode,
-		"created-" + strconv.FormatInt(created.Unix(), 10)}
+		"from-" + strconv.Itoa(template), "created-" + strconv.FormatInt(created.Unix(), 10)}
 }
 
 type Request struct {
@@ -140,6 +143,16 @@ func (p *Provisioner) Spawn(ctx context.Context, req Request) (res *Result, err 
 		}
 	}
 
+	template := pool.Template
+	if pool.Image != "" {
+		if p.Templates == nil {
+			return nil, fmt.Errorf("pool %q uses an image but image support is not configured", req.Pool)
+		}
+		if template, err = p.Templates(ctx, pool.Image); err != nil {
+			return nil, fmt.Errorf("image %s: %w", pool.Image, err)
+		}
+	}
+
 	id, err := p.Host.NextFreeID(ctx)
 	if err != nil {
 		return nil, err
@@ -169,7 +182,7 @@ func (p *Provisioner) Spawn(ctx context.Context, req Request) (res *Result, err 
 		return nil, fmt.Errorf("create JIT runner config: %w", err)
 	}
 
-	if err := p.Host.Exec(ctx, pve.LXCClone(pool.Template, id, name, p.Cfg.Proxmox.Pool, p.Cfg.Proxmox.Storage, pool.FullClone)); err != nil {
+	if err := p.Host.Exec(ctx, pve.LXCClone(template, id, name, p.Cfg.Proxmox.Pool, p.Cfg.Proxmox.Storage, pool.FullClone)); err != nil {
 		return nil, err
 	}
 	defer func() {
@@ -182,7 +195,7 @@ func (p *Provisioner) Spawn(ctx context.Context, req Request) (res *Result, err 
 			}
 		}
 	}()
-	spec := pve.LXCSpec{Cores: pool.Cores, MemoryMB: pool.MemoryMB, Tags: Tags(req.Pool, t.Owner(), pool.Mode, p.now()),
+	spec := pve.LXCSpec{Cores: pool.Cores, MemoryMB: pool.MemoryMB, Tags: Tags(req.Pool, t.Owner(), pool.Mode, template, p.now()),
 		Bridge: pool.Bridge, VLAN: pool.VLAN, Description: "GitHub Actions runner managed by pve-runners"}
 	if err = p.Host.Exec(ctx, pve.LXCSet(id, spec)); err != nil {
 		return nil, err

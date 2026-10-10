@@ -1,0 +1,36 @@
+- name: Resolve latest Helm
+  ansible.builtin.uri:
+    url: https://get.helm.sh/helm-latest-version
+    return_content: true
+  register: helm_latest
+  when: helm_version == 'latest'
+
+- name: Helm version
+  ansible.builtin.set_fact:
+    helm_resolved: "{{ helm_latest.content | trim if helm_version == 'latest' else helm_version }}"
+
+- name: Download Helm
+  ansible.builtin.get_url:
+    url: "https://get.helm.sh/helm-{{ helm_resolved }}-linux-{{ arch }}.tar.gz"
+    checksum: "sha256:https://get.helm.sh/helm-{{ helm_resolved }}-linux-{{ arch }}.tar.gz.sha256sum"
+    dest: /tmp/helm.tar.gz
+    mode: "0644"
+
+- name: Unpack Helm
+  ansible.builtin.unarchive:
+    src: /tmp/helm.tar.gz
+    dest: /tmp
+    remote_src: true
+
+- name: Install helm
+  ansible.builtin.copy:
+    src: "/tmp/linux-{{ arch }}/helm"
+    dest: /usr/local/bin/helm
+    remote_src: true
+    mode: "0755"
+
+- name: Remove download
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop: ["/tmp/helm.tar.gz", "/tmp/linux-{{ arch }}"]

@@ -1,0 +1,29 @@
+- name: Install common build tools
+  ansible.builtin.apt:
+    name: [git, git-lfs, jq, unzip, zip, zstd, xz-utils, build-essential, pkg-config, make, wget, rsync,
+           openssh-client, file, tree, gettext-base, software-properties-common]
+    state: present
+    install_recommends: false
+
+- name: Keyring directory
+  ansible.builtin.file:
+    path: /etc/apt/keyrings
+    state: directory
+    mode: "0755"
+
+- name: GitHub CLI apt key
+  ansible.builtin.get_url:
+    url: https://cli.github.com/packages/githubcli-archive-keyring.gpg
+    dest: /etc/apt/keyrings/githubcli-archive-keyring.gpg
+    mode: "0644"
+
+- name: GitHub CLI apt repo
+  ansible.builtin.copy:
+    dest: /etc/apt/sources.list.d/github-cli.list
+    content: "deb [arch={{ arch }} signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main\n"
+    mode: "0644"
+
+- name: Install gh
+  ansible.builtin.apt:
+    name: gh
+    update_cache: true

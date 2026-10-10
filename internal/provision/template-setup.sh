@@ -1,5 +1,6 @@
 #!/bin/sh
-# Runs INSIDE a container that is about to become a runner template (via `pve-runners template prepare`).
+# Runs INSIDE a container that is about to become a runner template (via `pve-runners template prepare`,
+# or the image build in templates/).
 # Installs the actions/runner tarball pushed to /tmp/actions-runner.tar.gz and a unit that runs exactly
 # one JIT job, then powers the guest off so the host can destroy it.
 set -eu
@@ -34,7 +35,9 @@ ExecStopPost=+/bin/systemctl poweroff --no-block
 WantedBy=multi-user.target
 UNIT
 
-systemctl daemon-reload
+# daemon-reload needs a running systemd; image builds run in a plain container where `enable` alone
+# is enough (it only writes symlinks).
+if [ -d /run/systemd/system ]; then systemctl daemon-reload; fi
 systemctl enable gh-runner.service
 # Clones must not share identity.
 truncate -s 0 /etc/machine-id

@@ -12,9 +12,11 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"runtime"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"text/tabwriter"
 	"time"
@@ -22,6 +24,7 @@ import (
 	"github.com/ServerTooling/proxmox-github-runners/internal/buildinfo"
 	"github.com/ServerTooling/proxmox-github-runners/internal/config"
 	"github.com/ServerTooling/proxmox-github-runners/internal/github"
+	"github.com/ServerTooling/proxmox-github-runners/internal/images"
 	"github.com/ServerTooling/proxmox-github-runners/internal/notify"
 	"github.com/ServerTooling/proxmox-github-runners/internal/provision"
 	"github.com/ServerTooling/proxmox-github-runners/internal/pve"
@@ -46,6 +49,7 @@ Usage:
   pve-runners reconcile                       destroy finished or expired runners once
   pve-runners status                          show runners on this host
   pve-runners template prepare --ctid ID      install the runner into a container and make it a template
+  pve-runners images list|pull|prune          runner images: show templates, fetch pools' images now, age out old ones
   pve-runners config validate|show            check or print the config (secrets are never in it)
   pve-runners update [--now]                  check for (and install) a newer release
   pve-runners version
@@ -123,6 +127,14 @@ func run(args []string) error {
 			return err
 		}
 		return cmdTemplatePrepare(ctx, *cfgPath, *ctid)
+	case "images":
+		if len(rest) == 0 {
+			return errors.New("usage: pve-runners images list|pull|prune")
+		}
+		if err := fs.Parse(rest[1:]); err != nil {
+			return err
+		}
+		return cmdImages(ctx, *cfgPath, rest[0])
 	case "config":
 		if len(rest) == 0 {
 			return errors.New("usage: pve-runners config validate|show")
@@ -217,8 +229,105 @@ func githubFor(cfg *config.Config) func(config.Target) (provision.JITSource, err
 	}
 }
 
-func provisioner(cfg *config.Config) *provision.Provisioner {
-	return &provision.Provisioner{Cfg: cfg, Host: host(cfg), GitHub: githubFor(cfg), Now: time.Now, TmpDir: os.TempDir()}
+func imageManager(ctx context.Context, cfg *config.Config) (*images.Manager, error) {
+	h := host(cfg)
+	probe, err := h.VolumePath(ctx, cfg.Images.CacheStorage+":vztmpl/probe.tar.zst")
+	if err != nil {
+		return nil, fmt.Errorf("images.cache_storage %q: %w", cfg.Images.CacheStorage, err)
+	}
+	return &images.Manager{Repo: cfg.Images.Repo, APIBase: github.DefaultAPI, HTTP: &http.Client{Timeout: 30 * time.Minute},
+		PublicKey: buildinfo.UpdatePublicKey, GOARCH: runtime.GOARCH, Host: h, Range: cfg.Images.VMIDRange,
+		CacheDir: filepath.Dir(probe), CacheStorage: cfg.Images.CacheStorage, Storage: cfg.Proxmox.Storage,
+		Pool: cfg.Proxmox.Pool, Bridge: "vmbr0", RootfsGB: cfg.Images.RootfsGB,
+		Retention: time.Duration(cfg.Images.RetentionDays) * 24 * time.Hour, Now: time.Now}, nil
+}
+
+// imageRefs lists the distinct images the pools use, in a stable order.
+func imageRefs(cfg *config.Config) []images.Ref {
+	var refs []images.Ref
+	seen := map[string]bool{}
+	for _, n := range cfg.PoolNames() {
+		if img := cfg.Pools[n].Image; img != "" && !seen[img] {
+			seen[img] = true
+			refs = append(refs, images.ParseRef(img))
+		}
+	}
+	return refs
+}
+
+func provisioner(ctx context.Context, cfg *config.Config) (*provision.Provisioner, error) {
+	p := &provision.Provisioner{Cfg: cfg, Host: host(cfg), GitHub: githubFor(cfg), Now: time.Now, TmpDir: os.TempDir()}
+	if len(imageRefs(cfg)) > 0 {
+		m, err := imageManager(ctx, cfg)
+		if err != nil {
+			return nil, err
+		}
+		p.Templates = func(ctx context.Context, image string) (int, error) { return m.Ensure(ctx, images.ParseRef(image)) }
+	}
+	return p, nil
+}
+
+// syncImages makes sure every pool's image has a template (pull), then ages out old templates and
+// archives (prune).
+func syncImages(ctx context.Context, cfg *config.Config, m *images.Manager, pull, prune bool) error {
+	var errs []error
+	refs := imageRefs(cfg)
+	for _, r := range refs {
+		if !pull {
+			break
+		}
+		id, err := m.Ensure(ctx, r)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("image %s: %w", r, err))
+			continue
+		}
+		slog.Info("image ready", "image", r.String(), "template", id)
+	}
+	if !prune {
+		return errors.Join(errs...)
+	}
+	runners, err := host(cfg).Runners(ctx)
+	if err != nil {
+		return errors.Join(append(errs, err)...)
+	}
+	removed, err := m.Prune(ctx, refs, images.InUse(runners))
+	for _, r := range removed {
+		slog.Info("image pruned", "what", r.What, "reason", r.Reason)
+	}
+	return errors.Join(append(errs, err)...)
+}
+
+func cmdImages(ctx context.Context, cfgPath, sub string) error {
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		return err
+	}
+	m, err := imageManager(ctx, cfg)
+	if err != nil {
+		return err
+	}
+	switch sub {
+	case "list":
+		tpls, err := m.Host.Templates(ctx, m.Range)
+		if err != nil {
+			return err
+		}
+		sort.Slice(tpls, func(i, j int) bool { return tpls[i].VMID < tpls[j].VMID })
+		w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
+		fmt.Fprintln(w, "ID\tIMAGE\tRELEASE\tCREATED")
+		for _, g := range tpls {
+			when := "incomplete"
+			var sec int64
+			if _, err := fmt.Sscan(g.TagValue("created"), &sec); err == nil && g.Template == 1 {
+				when = time.Unix(sec, 0).Format(time.DateOnly)
+			}
+			fmt.Fprintf(w, "%d\t%s\t%s%s\t%s\n", g.VMID, g.TagValue("image"), images.TagPrefix, g.TagValue("rel"), when)
+		}
+		return w.Flush()
+	case "pull", "prune":
+		return syncImages(ctx, cfg, m, sub == "pull", sub == "prune")
+	}
+	return fmt.Errorf("unknown images command %q; use list, pull or prune", sub)
 }
 
 func cmdSetup(ctx context.Context, cfgPath, listen string) error {
@@ -292,7 +401,11 @@ func cmdSpawn(ctx context.Context, cfgPath, pool, owner, repo string) error {
 	if err != nil {
 		return err
 	}
-	res, err := provisioner(cfg).Spawn(ctx, provision.Request{Pool: pool, Target: t, Repo: repo})
+	p, err := provisioner(ctx, cfg)
+	if err != nil {
+		return err
+	}
+	res, err := p.Spawn(ctx, provision.Request{Pool: pool, Target: t, Repo: repo})
 	if err != nil {
 		notifier(cfg).Send(ctx, notify.SpawnFailed, fmt.Sprintf("pool %s for %s: %v", pool, t.Owner(), err))
 		return err
@@ -408,8 +521,31 @@ func cmdRun(ctx context.Context, cfgPath string) error {
 	signal.Notify(reload, syscall.SIGHUP)
 	reconcileTick := time.NewTicker(30 * time.Second)
 	updateTick := time.NewTicker(cfg.Update.Interval)
+	imageTick := time.NewTicker(cfg.Images.CheckInterval)
 	defer reconcileTick.Stop()
 	defer updateTick.Stop()
+	defer imageTick.Stop()
+
+	// Image downloads can take minutes, so they run beside the loop, one sync at a time. The first
+	// one starts now so a new image is ready before the first job needs it.
+	var imageBusy atomic.Bool
+	syncImagesAsync := func(cfg *config.Config) {
+		if len(imageRefs(cfg)) == 0 || !imageBusy.CompareAndSwap(false, true) {
+			return
+		}
+		go func() {
+			defer imageBusy.Store(false)
+			m, err := imageManager(ctx, cfg)
+			if err == nil {
+				err = syncImages(ctx, cfg, m, true, true)
+			}
+			if err != nil && ctx.Err() == nil {
+				slog.Error("images", "err", err)
+				n.Send(ctx, notify.ImageFailed, err.Error())
+			}
+		}()
+	}
+	syncImagesAsync(cfg)
 	for {
 		select {
 		case <-ctx.Done():
@@ -422,6 +558,9 @@ func cmdRun(ctx context.Context, cfgPath string) error {
 			}
 			cfg = c
 			slog.Info("config reloaded")
+			syncImagesAsync(cfg)
+		case <-imageTick.C:
+			syncImagesAsync(cfg)
 		case <-reconcileTick.C:
 			done, err := reconcile.Once(ctx, cfg, host(cfg), time.Now())
 			for _, a := range done {
@@ -431,7 +570,8 @@ func cmdRun(ctx context.Context, cfgPath string) error {
 				slog.Error("reconcile", "err", err)
 			}
 		case <-updateTick.C:
-			if !cfg.Update.Enabled || u.Pending() || provision.Busy() {
+			// A restart mid-download would only waste the download, but there's no reason to.
+			if !cfg.Update.Enabled || u.Pending() || provision.Busy() || imageBusy.Load() {
 				continue
 			}
 			if err := cmdUpdate(ctx, cfg, true); err != nil {

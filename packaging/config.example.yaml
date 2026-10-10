@@ -9,7 +9,7 @@ proxmox:
   max_runners: 4                   # hard cap on runners on this host, across all pools and orgs
   vmid_range: [9000, 9499]         # runner containers only; templates must live outside it
   pool: gh-runners
-  storage: local-lvm               # only used for full clones
+  storage: local-lvm               # template root disks and full clones
   min_free_memory_mb: 2048         # never start a runner that would leave less than this free
 
 network:
@@ -32,18 +32,25 @@ targets:                           # one per org (or personal account), each wit
 pools:
   default:
     type: lxc
-    template: 8000                 # container ID made by `pve-runners template prepare --ctid 8000`
+    image: ubuntu-latest           # published image (Python, Go, Node, Helm, kubectl, Docker), newest release
+    # image: ubuntu-latest@template-ubuntu-latest-20261012-31   # or pin one release
+    # template: 8000               # or instead a container made by `pve-runners template prepare --ctid 8000`
     mode: ephemeral                # permanent is reserved for later
     labels: [proxmox]              # workflows use `runs-on: proxmox`
     cores: 4
     memory_mb: 8192
     disk_gb: 40
     # max_lifetime: 6h             # destroy runners older than this
-    # bridge: vmbr1                # optional dedicated bridge / VLAN for runners
+    # bridge: vmbr1                # bridge for the runner NIC (default vmbr0), and an optional VLAN
     # vlan: 50
 
 images:
-  retention_days: 30               # for downloaded template images (coming in a later release)
+  retention_days: 30               # age out downloaded images; the newest per name, pinned ones and
+                                   # ones runners were cloned from are always kept
+  vmid_range: [8900, 8999]         # template containers made from images; must not overlap proxmox.vmid_range
+  cache_storage: local             # Proxmox storage whose template cache keeps the downloaded archives
+  rootfs_gb: 16                    # template root disk; runners grow it to their pool's disk_gb
+  check_interval: 6h               # how often to look for newer images and prune old ones
 
 notify:
   # webhook_url_file: /etc/pve-runners/notify-url   # ntfy, Discord or Slack URL; off by default

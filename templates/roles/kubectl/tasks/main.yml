@@ -1,0 +1,17 @@
+- name: Resolve stable kubectl
+  ansible.builtin.uri:
+    url: https://dl.k8s.io/release/stable.txt
+    return_content: true
+  register: kubectl_stable
+  when: kubectl_version == 'stable'
+
+- name: kubectl version
+  ansible.builtin.set_fact:
+    kubectl_resolved: "{{ kubectl_stable.content | trim if kubectl_version == 'stable' else kubectl_version }}"
+
+- name: Install kubectl
+  ansible.builtin.get_url:
+    url: "https://dl.k8s.io/release/{{ kubectl_resolved }}/bin/linux/{{ arch }}/kubectl"
+    checksum: "sha256:https://dl.k8s.io/release/{{ kubectl_resolved }}/bin/linux/{{ arch }}/kubectl.sha256"
+    dest: /usr/local/bin/kubectl
+    mode: "0755"

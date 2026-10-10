@@ -124,3 +124,28 @@ func TestNewerVersionRefused(t *testing.T) {
 		t.Fatalf("got %v", err)
 	}
 }
+
+func TestImagePools(t *testing.T) {
+	c, _, err := Parse([]byte(strings.Replace(valid, "template: 8000", "image: ubuntu-latest", 1)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Images.Repo != c.Update.Repo || c.Images.VMIDRange != [2]int{8900, 8999} || c.Images.CacheStorage != "local" ||
+		c.Images.RootfsGB != 16 || c.Images.CheckInterval != 6*time.Hour || c.Pools["small"].Bridge != "vmbr0" {
+		t.Fatalf("image defaults not applied: %+v %+v", c.Images, c.Pools["small"])
+	}
+	for doc, want := range map[string]string{
+		strings.Replace(valid, "template: 8000", "template: 8000\n    image: ubuntu-latest", 1): "exactly one of image",
+		strings.Replace(valid, "template: 8000", "disk_gb: 0", 1):                               "exactly one of image",
+		strings.Replace(valid, "template: 8000", "image: Ubuntu Latest", 1):                     "pools.small.image",
+		strings.Replace(valid, "template: 8000", "image: ubuntu-latest\n    disk_gb: 8", 1):     "smaller than images.rootfs_gb",
+		valid + "images: {vmid_range: [9400, 9600]}\n":                                          "overlaps proxmox.vmid_range",
+	} {
+		if _, _, err := Parse([]byte(doc)); err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("want %q, got %v", want, err)
+		}
+	}
+	if _, _, err := Parse([]byte(strings.Replace(valid, "template: 8000", "image: ubuntu-latest@template-ubuntu-latest-20261012-5", 1))); err != nil {
+		t.Fatalf("pinned image: %v", err)
+	}
+}

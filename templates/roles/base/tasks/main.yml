@@ -1,0 +1,23 @@
+# The Docker base image has no init system; Proxmox LXC boots /sbin/init and configures eth0 through
+# systemd-networkd, so both have to be present and enabled.
+- name: Install init and networking
+  ansible.builtin.apt:
+    name: [systemd, systemd-sysv, systemd-resolved, dbus, iproute2, iputils-ping, ca-certificates, curl, gnupg,
+           sudo, locales, tzdata, less, nano, cron]
+    state: present
+    update_cache: true
+    install_recommends: false
+
+- name: Enable networkd and resolved
+  ansible.builtin.command: systemctl enable systemd-networkd systemd-resolved
+  changed_when: true
+
+- name: Generate en_US.UTF-8 locale
+  community.general.locale_gen:
+    name: en_US.UTF-8
+
+- name: Default locale
+  ansible.builtin.copy:
+    dest: /etc/default/locale
+    content: "LANG=en_US.UTF-8\n"
+    mode: "0644"

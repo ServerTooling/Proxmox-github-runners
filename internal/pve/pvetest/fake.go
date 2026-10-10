@@ -84,6 +84,9 @@ func (f *Fake) Run(_ context.Context, name string, args ...string) ([]byte, erro
 		return json.Marshal(f.Guests)
 	case name == "pvesh" && strings.HasSuffix(args[1], "/status"):
 		return []byte(fmt.Sprintf(`{"memory":{"free":%d,"total":%d,"used":0}}`, int64(f.FreeMB)<<20, int64(f.FreeMB)<<20)), nil
+	case name == "pvesm" && args[0] == "path":
+		_, file, _ := strings.Cut(args[1], ":vztmpl/")
+		return []byte("/var/lib/vz/template/cache/" + file + "\n"), nil
 	case name == "pct":
 		return nil, f.pct(args)
 	}
@@ -147,7 +150,21 @@ func (f *Fake) pct(args []string) error {
 			content = c
 		}
 		f.Pushed[args[1]+":"+args[3]] = content
-	case "exec", "template", "resize":
+	case "create":
+		id, _ := strconv.Atoi(args[1])
+		g := pve.Guest{VMID: id, Type: "lxc", Status: "stopped", Node: "pve1"}
+		for i := 3; i+1 < len(args); i += 2 {
+			switch args[i] {
+			case "--hostname":
+				g.Name = args[i+1]
+			case "--tags":
+				g.RawTags = args[i+1]
+			}
+		}
+		f.Guests = append(f.Guests, g)
+	case "template":
+		f.find(args[1]).Template = 1
+	case "exec", "resize":
 	default:
 		return fmt.Errorf("fake: unexpected pct %s", args[0])
 	}

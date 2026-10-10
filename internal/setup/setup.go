@@ -130,6 +130,9 @@ func (s *Server) auth(next http.Handler) http.Handler {
 
 func baseURL(r *http.Request) string { return "http://" + r.Host }
 
+// DefaultImage is the published runner image a new pool uses when no template container is given.
+const DefaultImage = "ubuntu-latest"
+
 var ownerRe = regexp.MustCompile(`^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$`)
 
 func (s *Server) fail(w http.ResponseWriter, r *http.Request, msg string) {
@@ -140,7 +143,11 @@ func (s *Server) fail(w http.ResponseWriter, r *http.Request, msg string) {
 }
 
 func (s *Server) saveHost(w http.ResponseWriter, r *http.Request) {
-	tpl, err1 := strconv.Atoi(r.FormValue("template"))
+	// An empty template ID means the published ubuntu-latest image, which the service downloads.
+	tpl, err1 := 0, error(nil)
+	if v := strings.TrimSpace(r.FormValue("template")); v != "" {
+		tpl, err1 = strconv.Atoi(v)
+	}
 	maxR, err2 := strconv.Atoi(r.FormValue("max_runners"))
 	if err1 != nil || err2 != nil {
 		s.fail(w, r, "Template ID and max runners must be numbers.")
@@ -154,7 +161,10 @@ func (s *Server) saveHost(w http.ResponseWriter, r *http.Request) {
 		p = &config.Pool{Type: "lxc", Mode: "ephemeral", Labels: []string{"proxmox"}}
 		s.Cfg.Pools["default"] = p
 	}
-	p.Template = tpl
+	p.Template, p.Image = tpl, ""
+	if tpl == 0 {
+		p.Image = DefaultImage
+	}
 	s.errMsg = ""
 	s.mu.Unlock()
 	http.Redirect(w, r, "/", http.StatusSeeOther)
@@ -357,8 +367,9 @@ var indexTmpl = template.Must(template.New("index").Parse(page + `
 {{if .Error}}<p class="err">{{.Error}}</p>{{end}}
 <form method="post" action="/host"><fieldset><legend>1. This Proxmox host</legend>
 <p><label>Node name <input name="node" value="{{.Cfg.Proxmox.Node}}" required></label></p>
-<p><label>Runner template container ID <input name="template" value="{{if .Template}}{{.Template}}{{end}}" size="6" required></label><br>
-<small>A container prepared with <code>pve-runners template prepare</code>, outside IDs {{index .Cfg.Proxmox.VMIDRange 0}}-{{index .Cfg.Proxmox.VMIDRange 1}}.</small></p>
+<p><label>Runner template container ID <input name="template" value="{{if .Template}}{{.Template}}{{end}}" size="6" placeholder="optional"></label><br>
+<small>Leave empty to use the published <code>ubuntu-latest</code> image (Python, Go, Node, Helm, kubectl, Docker), which is downloaded automatically.
+Or enter a container you prepared with <code>pve-runners template prepare</code>, outside IDs {{index .Cfg.Proxmox.VMIDRange 0}}-{{index .Cfg.Proxmox.VMIDRange 1}}.</small></p>
 <p><label>Max runners at once <input name="max_runners" value="{{.Cfg.Proxmox.MaxRunners}}" size="3"></label></p>
 <button>Save</button></fieldset></form>
 
