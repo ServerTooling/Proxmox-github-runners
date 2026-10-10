@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"syscall"
@@ -42,7 +43,9 @@ const (
 const usage = `pve-runners: ephemeral GitHub Actions runners on Proxmox VE
 
 Usage:
-  pve-runners setup [--listen :8765]          first-run setup page (GitHub Apps, orgs, template)
+  pve-runners setup [--listen :8765] [--open-firewall]
+                                              first-run setup page (GitHub Apps, orgs, template);
+                                              --open-firewall allows the port until setup ends
   pve-runners run                             the service: reconcile + self-update loops
   pve-runners spawn --pool NAME --owner ORG [--repo NAME]
                                               create one ephemeral runner now
@@ -84,10 +87,11 @@ func run(args []string) error {
 		return nil
 	case "setup":
 		listen := fs.String("listen", ":8765", "address for the setup page")
+		openFW := fs.Bool("open-firewall", false, "allow the setup port through the Proxmox host firewall until setup ends")
 		if err := fs.Parse(rest); err != nil {
 			return err
 		}
-		return cmdSetup(ctx, *cfgPath, *listen)
+		return cmdSetup(ctx, *cfgPath, *listen, *openFW)
 	case "run":
 		if err := fs.Parse(rest); err != nil {
 			return err
@@ -346,7 +350,7 @@ func nodeName() string {
 	return strings.SplitN(h, ".", 2)[0]
 }
 
-func cmdSetup(ctx context.Context, cfgPath, listen string) error {
+func cmdSetup(ctx context.Context, cfgPath, listen string, openFirewall bool) error {
 	// A missing or empty config starts from the defaults; re-running setup adds to an existing one.
 	if _, err := config.Init(cfgPath, nodeName()); err != nil {
 		return err
@@ -368,10 +372,51 @@ func cmdSetup(ctx context.Context, cfgPath, listen string) error {
 	}
 	srv := &http.Server{Handler: s.Handler(), ReadHeaderTimeout: 10 * time.Second}
 	go func() { _ = srv.Serve(ln) }()
-	port := ln.Addr().(*net.TCPAddr).Port
-	fmt.Println("Open this link in a browser on your network to finish setup:")
-	for _, ip := range hostIPs() {
-		fmt.Printf("  http://%s:%d/?t=%s\n", ip, port, s.Token)
+	addr := ln.Addr().(*net.TCPAddr)
+	port := addr.Port
+
+	h := host(cfg)
+	firewallOn, _ := h.ClusterFirewallEnabled(ctx)
+	if openFirewall {
+		// Clear a rule left by a run that was killed, then open the port for this run only.
+		_ = h.CloseSetupPort(ctx)
+		closeFn, err := h.OpenSetupPort(ctx, port)
+		if err != nil {
+			return fmt.Errorf("open port %d in the Proxmox firewall: %w", port, err)
+		}
+		defer func() {
+			if err := closeFn(context.Background()); err != nil {
+				fmt.Fprintf(os.Stderr, "remove the temporary firewall rule by hand (comment %q): %v\n", pve.SetupRuleComment, err)
+			}
+		}()
+	}
+
+	ips := []string{addr.IP.String()}
+	if addr.IP.IsUnspecified() {
+		ips = setup.OrderAddrs(hostIPs(), preferredIPs())
+	}
+	link := func(ip string) string {
+		return fmt.Sprintf("http://%s/?t=%s", net.JoinHostPort(ip, strconv.Itoa(port)), s.Token)
+	}
+	fmt.Printf("Open the setup page in a browser (it listens on port %d):\n", port)
+	note := ""
+	if pref := preferredIPs(); len(pref) > 0 && pref[0] == ips[0] {
+		note = "   <- recommended: the address the Proxmox web UI is on"
+	}
+	fmt.Printf("  %s%s\n", link(ips[0]), note)
+	if len(ips) > 1 {
+		fmt.Println("Other addresses of this host, only if that one doesn't load from your computer:")
+		for _, ip := range ips[1:] {
+			fmt.Printf("  %s\n", link(ip))
+		}
+	}
+	switch {
+	case openFirewall:
+		fmt.Printf("Port %d is allowed through the Proxmox firewall until setup ends.\n", port)
+	case firewallOn:
+		fmt.Printf("The Proxmox firewall is on, so port %d is probably blocked and the page won't load. Either:\n", port)
+		fmt.Printf("  - stop this (Ctrl+C) and run: pve-runners setup --open-firewall   (allows the port until setup ends), or\n")
+		fmt.Printf("  - from your computer run: ssh -L %d:127.0.0.1:%d root@%s   then open %s\n", port, port, ips[0], link("127.0.0.1"))
 	}
 	fmt.Println("The page closes itself when setup is done (Ctrl+C to abort).")
 	select {
@@ -394,6 +439,26 @@ func hostIPs() []string {
 	}
 	if len(out) == 0 {
 		out = []string{"<this-host>"}
+	}
+	return out
+}
+
+// preferredIPs are the addresses most likely to be reachable from the owner's computer: the one the
+// node name resolves to (Proxmox requires that to be the management address the web UI is on),
+// then the source address of the default route.
+func preferredIPs() []string {
+	var out []string
+	if addrs, err := net.LookupHost(nodeName()); err == nil {
+		for _, a := range addrs {
+			if ip := net.ParseIP(a); ip != nil && ip.To4() != nil && !ip.IsLoopback() {
+				out = append(out, a)
+			}
+		}
+	}
+	// A UDP "connection" sends nothing; it only asks the kernel which source address it would use.
+	if c, err := net.Dial("udp4", "192.0.2.1:9"); err == nil {
+		out = append(out, c.LocalAddr().(*net.UDPAddr).IP.String())
+		c.Close()
 	}
 	return out
 }

@@ -142,3 +142,11 @@ func TestPersonalAccountKeepsOnlyPrivateRepos(t *testing.T) {
 		t.Fatalf("target %+v", tg)
 	}
 }
+
+func TestOrderAddrsPutsWebUIAddressFirst(t *testing.T) {
+	got := OrderAddrs([]string{"198.51.100.1", "192.0.2.10", "203.0.113.5"}, []string{"192.0.2.10", "192.0.2.99", "203.0.113.5"})
+	want := []string{"192.0.2.10", "203.0.113.5", "198.51.100.1"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("got %v", got)
+	}
+}

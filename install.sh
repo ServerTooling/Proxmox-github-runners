@@ -55,7 +55,7 @@ if /usr/local/bin/pve-runners config validate | grep -q ': 0 targets'; then
   echo "Settings: /etc/pve-runners/config.yaml (every option is listed there with its default)."
   echo "Next, connect GitHub:"
   echo "  1. Turn on the datacenter firewall (Datacenter > Firewall > Options); runners stay off the LAN through it."
-  echo "  2. Run: pve-runners setup   (prints a link to open in your browser)"
+  echo "  2. Run: pve-runners setup --open-firewall   (open the first link it prints in your browser)"
   echo "  3. Run: systemctl enable --now pve-runners"
 else
   systemctl enable pve-runners >/dev/null 2>&1

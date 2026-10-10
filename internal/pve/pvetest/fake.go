@@ -24,6 +24,8 @@ type Fake struct {
 	// FirewallOn is the datacenter firewall switch; Group is the egress group's rules (nil = no group).
 	FirewallOn bool
 	Group      []map[string]any
+	// NodeRules are the host firewall rules (pos, comment, dport).
+	NodeRules []map[string]any
 }
 
 func New(guests ...pve.Guest) *Fake {
@@ -77,6 +79,41 @@ func (f *Fake) Run(_ context.Context, name string, args ...string) ([]byte, erro
 		pos, _ := strconv.Atoi(r["pos"].(string))
 		r["pos"] = float64(pos)
 		f.Group = append(f.Group, r)
+		return nil, nil
+	case name == "pvesh" && strings.HasPrefix(args[1], "/nodes/") && strings.HasSuffix(args[1], "/firewall/rules") &&
+		!strings.Contains(args[1], "/lxc/"):
+		switch args[0] {
+		case "get":
+			if f.NodeRules == nil {
+				return []byte("[]"), nil
+			}
+			return json.Marshal(f.NodeRules)
+		case "create":
+			r := map[string]any{"pos": float64(0)}
+			for i := 2; i+1 < len(args); i += 2 {
+				r[strings.TrimPrefix(args[i], "--")] = args[i+1]
+			}
+			// New rules go to the top, like Proxmox does.
+			for _, o := range f.NodeRules {
+				o["pos"] = o["pos"].(float64) + 1
+			}
+			f.NodeRules = append([]map[string]any{r}, f.NodeRules...)
+		}
+		return nil, nil
+	case name == "pvesh" && args[0] == "delete" && strings.HasPrefix(args[1], "/nodes/") &&
+		strings.Contains(args[1], "/firewall/rules/") && !strings.Contains(args[1], "/lxc/"):
+		parts := strings.Split(args[1], "/")
+		pos, _ := strconv.Atoi(parts[len(parts)-1])
+		var kept []map[string]any
+		for _, r := range f.NodeRules {
+			if p := int(r["pos"].(float64)); p != pos {
+				if p > pos {
+					r["pos"] = float64(p - 1)
+				}
+				kept = append(kept, r)
+			}
+		}
+		f.NodeRules = kept
 		return nil, nil
 	case name == "pvesh" && strings.HasPrefix(args[1], "/nodes/") && strings.Contains(args[1], "/firewall/"):
 		return nil, nil

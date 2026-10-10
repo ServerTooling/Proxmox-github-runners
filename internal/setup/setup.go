@@ -20,6 +20,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -393,3 +394,23 @@ var redirectTmpl = template.Must(template.New("redirect").Parse(page + `
 
 var doneTmpl = template.Must(template.New("done").Parse(page + `
 <h1>Setup complete</h1><p>Config written to <code>{{.Path}}</code>. You can close this page; the service starts now.</p></body></html>`))
+
+// OrderAddrs puts the preferred addresses (in their order, when the host has them) ahead of the
+// rest, so the first setup link is the one most likely to load: the Proxmox web UI's address.
+func OrderAddrs(addrs, preferred []string) []string {
+	var out []string
+	seen := map[string]bool{}
+	for _, p := range preferred {
+		if p != "" && !seen[p] && slices.Contains(addrs, p) {
+			seen[p] = true
+			out = append(out, p)
+		}
+	}
+	for _, a := range addrs {
+		if !seen[a] {
+			seen[a] = true
+			out = append(out, a)
+		}
+	}
+	return out
+}

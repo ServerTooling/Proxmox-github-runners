@@ -139,3 +139,24 @@ func TestEnsureEgressGroupRewritesOnlyWhenChanged(t *testing.T) {
 		t.Fatalf("got %q", m)
 	}
 }
+
+func TestSetupPortRuleIsAddedAndOnlyItsOwnRemoved(t *testing.T) {
+	f := pvetest.New()
+	f.NodeRules = []map[string]any{{"pos": float64(0), "comment": "owner rule", "dport": "22"}}
+	h := &pve.Host{R: f, Node: "pve1"}
+	closeFn, err := h.OpenSetupPort(context.Background(), 8765)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m := f.Mutations(); !reflect.DeepEqual(m, []string{"pvesh create /nodes/pve1/firewall/rules --type in --action ACCEPT " +
+		"--proto tcp --dport 8765 --enable 1 --comment pve-runners setup (temporary)"}) {
+		t.Fatalf("%q", m)
+	}
+	if err := closeFn(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if m := f.Mutations(); m[len(m)-1] != "pvesh delete /nodes/pve1/firewall/rules/0" ||
+		len(f.NodeRules) != 1 || f.NodeRules[0]["comment"] != "owner rule" {
+		t.Fatalf("commands %q, rules left %v", m, f.NodeRules)
+	}
+}
