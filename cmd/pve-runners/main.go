@@ -320,9 +320,9 @@ func webActions(cfgPath string, imageBusy *atomic.Bool) []setup.Action {
 			if err != nil {
 				return err
 			}
-			// Same guards as the automatic update: a restart mid-spawn would strand a half-made runner.
-			if install && (updater(cfg).Pending() || imageBusy.Load() || provision.Busy()) {
-				return errors.New("a runner is starting, an image sync is running, or an update is still being verified; try again shortly")
+			// Same guards as the automatic update; a runner being started is waited for in cmdUpdate.
+			if install && (updater(cfg).Pending() || imageBusy.Load()) {
+				return errors.New("an image sync is running, or an update is still being verified; try again shortly")
 			}
 			return cmdUpdate(ctx, w, cfg, install)
 		}
@@ -885,7 +885,19 @@ func cmdUpdate(ctx context.Context, w io.Writer, cfg *config.Config, install boo
 	if err != nil {
 		return err
 	}
-	return u.Install(ctx, rel.Tag, bin)
+	// A restart mid-spawn would strand a half-made runner, so new spawns stop and the running one
+	// finishes first. They stay stopped until the restart, or resume if the install fails or the
+	// restart somehow never comes.
+	release, err := provision.Drain(ctx, 5*time.Minute)
+	if err != nil {
+		return err
+	}
+	if err := u.Install(ctx, rel.Tag, bin); err != nil {
+		release()
+		return err
+	}
+	time.AfterFunc(2*time.Minute, release)
+	return nil
 }
 
 // selfCheck is what a freshly updated binary must pass before it confirms the update.
@@ -1081,7 +1093,7 @@ func cmdRun(ctx context.Context, cfgPath string) error {
 			}
 		case <-updateTick.C:
 			// A restart mid-download would only waste the download, but there's no reason to.
-			if !cfg.Update.Enabled || u.Pending() || provision.Busy() || imageBusy.Load() {
+			if !cfg.Update.Enabled || u.Pending() || imageBusy.Load() {
 				continue
 			}
 			if err := cmdUpdate(ctx, io.Discard, cfg, true); err != nil {
