@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"errors"
+	"os/exec"
 	"regexp"
 	"strings"
 	"sync/atomic"
@@ -71,5 +73,17 @@ func TestImageButtonsWaitForTheRunLoopsSync(t *testing.T) {
 	}
 	if !busy.Load() {
 		t.Fatal("a refused action released the run loop's guard")
+	}
+}
+
+func TestRestartUnderway(t *testing.T) {
+	if err := exec.Command("sh", "-c", "kill -TERM $$").Run(); !restartUnderway(err) {
+		t.Fatalf("a SIGTERM'd systemctl means the restart is underway: %v", err)
+	}
+	if err := exec.Command("sh", "-c", "exit 1").Run(); restartUnderway(err) {
+		t.Fatal("a failed systemctl is a failure")
+	}
+	if restartUnderway(errors.New("not started")) {
+		t.Fatal("other errors are failures")
 	}
 }

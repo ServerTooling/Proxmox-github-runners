@@ -16,6 +16,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -225,6 +226,9 @@ func updater(cfg *config.Config) *update.Updater {
 		BinPath: binPath, StateDir: stateDir, Now: time.Now,
 		Exec: func(ctx context.Context, name string, args ...string) error {
 			out, err := exec.CommandContext(ctx, name, args...).CombinedOutput()
+			if err != nil && name == "systemctl" && slices.Contains(args, "restart") && restartUnderway(err) {
+				return nil
+			}
 			if err != nil {
 				return fmt.Errorf("%s: %w: %s", name, err, strings.TrimSpace(string(out)))
 			}
@@ -387,20 +391,24 @@ func nodeCert() (tls.Certificate, error) {
 	return tls.Certificate{}, errors.New("no Proxmox node certificate in /etc/pve/local")
 }
 
+// restartUnderway reports a `systemctl restart` of this service that was itself terminated: the restart
+// stops the service's whole cgroup, systemctl included, often before it exits, so this means the
+// restart is happening, not that it failed.
+func restartUnderway(err error) bool {
+	var ee *exec.ExitError
+	if !errors.As(err, &ee) {
+		return false
+	}
+	ws, ok := ee.Sys().(syscall.WaitStatus)
+	return ok && ws.Signaled() && ws.Signal() == syscall.SIGTERM
+}
+
 // restartSoon restarts the service after a save, once the "saved" page has reached the browser.
 func restartSoon() {
 	go func() {
 		time.Sleep(time.Second)
 		out, err := exec.Command("systemctl", "restart", "--no-block", "pve-runners.service").CombinedOutput()
-		// The restart stops this service's whole cgroup, systemctl included, often before it exits; being
-		// terminated that way means the restart is underway, not that it failed.
-		var ee *exec.ExitError
-		if errors.As(err, &ee) {
-			if ws, ok := ee.Sys().(syscall.WaitStatus); ok && ws.Signaled() && ws.Signal() == syscall.SIGTERM {
-				return
-			}
-		}
-		if err != nil {
+		if err != nil && !restartUnderway(err) {
 			slog.Error("restart after saving settings", "err", err, "output", strings.TrimSpace(string(out)))
 		}
 	}()

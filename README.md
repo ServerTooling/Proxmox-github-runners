@@ -97,7 +97,10 @@ Two pool settings cut the wait before a job's first step. Every job still gets a
   only for orgs whose repos you trust with each other. A folder over `cache.max_gb` (50 by default) is
   emptied once none of that org's runners are running; `pve-runners cache clear` empties them now.
   The folder lives on the host's own disk unless `cache.dir` points elsewhere, such as a ZFS dataset
-  with a quota.
+  with a quota. Turn off the built-in caching of `setup-go`, `setup-node` and `setup-python`
+  (`cache: false`) in workflows that run here: the shared folder already holds what they would restore,
+  and their restore unpacks an archive over files that jobs running beside it have open, which has
+  crashed Go builds with `SIGBUS`.
 
 ## Settings page
 

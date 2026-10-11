@@ -373,7 +373,8 @@ func (h *Host) Destroy(ctx context.Context, id int) error {
 			return fmt.Errorf("%w: %d (%s)", ErrNotOwned, id, g.Name)
 		}
 		if g.Status == "running" {
-			if err := h.Exec(ctx, LXCStop(id)); err != nil {
+			// An ephemeral runner powers itself off after its job, so it can stop between the list and here.
+			if err := h.Exec(ctx, LXCStop(id)); err != nil && !strings.Contains(err.Error(), "not running") {
 				return err
 			}
 		}
