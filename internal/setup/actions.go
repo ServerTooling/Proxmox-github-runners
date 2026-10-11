@@ -14,6 +14,8 @@ import (
 // some (image pulls, template prep) take minutes; the page shows its output as it arrives.
 type Action struct {
 	Name, Label, Help string
+	// Group is the card the button sits in on the page, such as "Images".
+	Group string
 	// Args are form inputs passed to Run by name, such as "pool" for spawn.
 	Args []string
 	// Confirm, when set, is asked in the browser before running.
@@ -109,10 +111,16 @@ type actionView struct {
 	Last *runView
 }
 
-// actionViews pairs each action with its latest run, and reports whether any is still running so the
-// page can refresh itself until it ends.
-func (s *Server) actionViews() ([]actionView, bool) {
-	var out []actionView
+type actionGroup struct {
+	Name    string
+	Actions []actionView
+}
+
+// actionViews pairs each action with its latest run, grouped in the order the groups first appear, and
+// reports whether any is still running so the page can refresh itself until it ends.
+func (s *Server) actionViews() ([]actionGroup, bool) {
+	var out []actionGroup
+	at := map[string]int{}
 	busy := false
 	for _, a := range s.Service.Actions {
 		v := actionView{Action: a}
@@ -121,21 +129,30 @@ func (s *Server) actionViews() ([]actionView, bool) {
 			v.Last = &rv
 			busy = busy || rv.Running
 		}
-		out = append(out, v)
+		g := a.Group
+		if g == "" {
+			g = "Other"
+		}
+		i, ok := at[g]
+		if !ok {
+			i, at[g] = len(out), len(out)
+			out = append(out, actionGroup{Name: g})
+		}
+		out[i].Actions = append(out[i].Actions, v)
 	}
 	return out, busy
 }
 
-// statusText runs the status command for the top of the page, briefly enough not to hold it up.
-func (s *Server) statusText(ctx context.Context) string {
+// status runs the status command for the overview, briefly enough not to hold the page up.
+func (s *Server) status(ctx context.Context) (*StatusReport, string) {
 	if s.Service.Status == nil {
-		return ""
+		return nil, ""
 	}
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
-	var b bytes.Buffer
-	if err := s.Service.Status(ctx, &b); err != nil {
-		b.WriteString("error: " + err.Error())
+	r, err := s.Service.Status(ctx)
+	if err != nil {
+		return nil, err.Error()
 	}
-	return b.String()
+	return r, ""
 }
