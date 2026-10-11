@@ -272,7 +272,7 @@ func startWeb(ctx context.Context, cfg *config.Config, cfgPath string, imageBusy
 	}
 	s.Service = &setup.Service{Login: setup.PVELogin("https://127.0.0.1:8006", setup.PinnedClient(cert.Certificate[0])),
 		SecretDir: config.DefaultDir, FailDelay: 2 * time.Second, Saved: restartSoon, Ctx: ctx,
-		Status:  func(ctx context.Context, w io.Writer) error { return cmdStatus(ctx, w, cfgPath) },
+		Status:  func(ctx context.Context) (*setup.StatusReport, error) { return statusReport(ctx, cfgPath) },
 		Actions: webActions(cfgPath, imageBusy)}
 	srv := &http.Server{Addr: cfg.Web.Listen, Handler: s.Handler(), ReadHeaderTimeout: 10 * time.Second,
 		TLSConfig: &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12}}
@@ -328,11 +328,11 @@ func webActions(cfgPath string, imageBusy *atomic.Bool) []setup.Action {
 		}
 	}
 	return []setup.Action{
-		{Name: "reconcile", Label: "Clean up runners now", Help: "Destroy finished or expired runners (pve-runners reconcile).",
+		{Name: "reconcile", Group: "Runners", Label: "Clean up runners now", Help: "Destroy finished or expired runners (pve-runners reconcile).",
 			Run: func(ctx context.Context, w io.Writer, _ map[string]string) error {
 				return cmdReconcile(ctx, w, cfgPath)
 			}},
-		{Name: "spawn", Label: "Start a runner", Help: "One ephemeral runner now; repo is only for personal accounts.",
+		{Name: "spawn", Group: "Runners", Label: "Start a runner", Help: "One ephemeral runner now; repo is only for personal accounts.",
 			Args: []string{"pool", "owner", "repo"},
 			Run: func(ctx context.Context, w io.Writer, a map[string]string) error {
 				pool := a["pool"]
@@ -341,28 +341,29 @@ func webActions(cfgPath string, imageBusy *atomic.Bool) []setup.Action {
 				}
 				return cmdSpawn(ctx, w, cfgPath, pool, a["owner"], a["repo"])
 			}},
-		{Name: "images-list", Label: "List images", Help: "Runner image templates on this host.", Run: images("list")},
-		{Name: "images-pull", Label: "Pull latest images", Help: "Fetch every pool's newest image now.",
+		{Name: "images-list", Group: "Images", Label: "List images", Help: "Runner image templates on this host.", Run: images("list")},
+		{Name: "images-pull", Group: "Images", Label: "Pull latest images", Help: "Fetch every pool's newest image now.",
 			Run: images("pull")},
-		{Name: "images-prune", Label: "Prune old images", Help: "Age out templates and downloads no pool uses.",
+		{Name: "images-prune", Group: "Images", Label: "Prune old images", Help: "Age out templates and downloads no pool uses.",
 			Confirm: "Delete old image templates and downloads?", Run: images("prune")},
-		{Name: "update-check", Label: "Check for updates", Run: update(false)},
-		{Name: "update-now", Label: "Update now", Help: "Installs the newest release and restarts the service.",
+		{Name: "update-check", Group: "Updates", Label: "Check for updates", Help: "Compare with the newest published build.",
+			Run: update(false)},
+		{Name: "update-now", Group: "Updates", Label: "Update now", Help: "Installs the newest release and restarts the service.",
 			Confirm: "Install the update and restart pve-runners?", Run: update(true)},
-		{Name: "logs-ship", Label: "Ship logs now", Help: "Send new log lines to Loki.",
-			Run: func(ctx context.Context, w io.Writer, _ map[string]string) error { return cmdLogsShip(ctx, w, cfgPath) }},
-		{Name: "cache-list", Label: "Show cache sizes", Help: "Each org's shared runner cache folder.",
+		{Name: "cache-list", Group: "Cache", Label: "Show cache sizes", Help: "Each org's shared runner cache folder.",
 			Run: func(ctx context.Context, w io.Writer, _ map[string]string) error {
 				return cmdCache(ctx, w, cfgPath, false)
 			}},
-		{Name: "cache-clear", Label: "Clear caches", Help: "Empty the shared caches no running runner is using.",
+		{Name: "cache-clear", Group: "Cache", Label: "Clear caches", Help: "Empty the shared caches no running runner is using.",
 			Confirm: "Empty the shared runner caches? The next jobs download their tools again.",
 			Run: func(ctx context.Context, w io.Writer, _ map[string]string) error {
 				return cmdCache(ctx, w, cfgPath, true)
 			}},
-		{Name: "config-show", Label: "Show config file", Help: "The file as saved; secrets are never in it.",
+		{Name: "logs-ship", Group: "Maintenance", Label: "Ship logs now", Help: "Send new log lines to Loki.",
+			Run: func(ctx context.Context, w io.Writer, _ map[string]string) error { return cmdLogsShip(ctx, w, cfgPath) }},
+		{Name: "config-show", Group: "Maintenance", Label: "Show config file", Help: "The file as saved; secrets are never in it.",
 			Run: func(_ context.Context, w io.Writer, _ map[string]string) error { return cmdConfig(w, cfgPath, true) }},
-		{Name: "template-prepare", Label: "Prepare a template", Help: "Install the runner into a container and make it a template.",
+		{Name: "template-prepare", Group: "Images", Label: "Prepare a template", Help: "Install the runner into a container and make it a template.",
 			Args: []string{"ctid"}, Confirm: "Turn this container into a runner template?",
 			Run: func(ctx context.Context, w io.Writer, a map[string]string) error {
 				id, err := strconv.Atoi(a["ctid"])
@@ -795,45 +796,50 @@ func cmdSpawn(ctx context.Context, w io.Writer, cfgPath, pool, owner, repo strin
 }
 
 func cmdStatus(ctx context.Context, out io.Writer, cfgPath string) error {
-	cfg, err := config.Load(cfgPath)
+	r, err := statusReport(ctx, cfgPath)
 	if err != nil {
 		return err
+	}
+	r.Print(out)
+	return nil
+}
+
+func statusReport(ctx context.Context, cfgPath string) (*setup.StatusReport, error) {
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		return nil, err
 	}
 	h := host(cfg)
 	runners, err := h.Runners(ctx)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	sort.Slice(runners, func(i, j int) bool { return runners[i].VMID < runners[j].VMID })
-	fmt.Fprintf(out, "pve-runners %s on %s: %d/%d runners\n", buildinfo.Version, cfg.HostID, len(runners), cfg.Proxmox.MaxRunners)
-	w := tabwriter.NewWriter(out, 0, 4, 2, ' ', 0)
-	fmt.Fprintln(w, "ID\tNAME\tSTATUS\tPOOL\tOWNER\tAGE")
+	r := &setup.StatusReport{Version: buildinfo.Version, Host: cfg.HostID, Max: cfg.Proxmox.MaxRunners}
 	for _, g := range runners {
 		age := "?"
 		var sec int64
 		if _, err := fmt.Sscan(g.TagValue("created"), &sec); err == nil && sec > 0 {
 			age = time.Since(time.Unix(sec, 0)).Round(time.Second).String()
 		}
-		fmt.Fprintf(w, "%d\t%s\t%s\t%s\t%s\t%s\n", g.VMID, g.Name, g.Status, g.TagValue("pool"), g.TagValue("owner"), age)
+		r.Runners = append(r.Runners, setup.RunnerRow{ID: g.VMID, Name: g.Name, Status: g.Status,
+			Pool: g.TagValue("pool"), Owner: g.TagValue("owner"), Age: age})
 	}
-	w.Flush()
 	for _, a := range reconcile.Plan(cfg, runners, time.Now()) {
-		fmt.Fprintf(out, "pending cleanup: %d (%s)\n", a.VMID, a.Reason)
+		r.Pending = append(r.Pending, fmt.Sprintf("%d (%s)", a.VMID, a.Reason))
 	}
 	if st, err := h.RootfsStorage(ctx, cfg.Proxmox.Storage); err != nil {
-		fmt.Fprintln(out, "warning:", err)
+		r.Warnings = append(r.Warnings, err.Error())
 	} else {
-		fmt.Fprintln(out, "container storage:", st)
+		r.Storage = st
 	}
 	if on, err := h.ClusterFirewallEnabled(ctx); err == nil && !on && cfg.Network.Isolated() {
-		fmt.Fprintln(out, "warning: the datacenter firewall is off; runners cannot be isolated from the LAN, so spawning is refused")
+		r.Warnings = append(r.Warnings, "the datacenter firewall is off; runners cannot be isolated from the LAN, so spawning is refused")
 	}
 	if ws, _, err := h.GatewayWarnings(ctx, runnerBridge(cfg)); err == nil {
-		for _, w := range ws {
-			fmt.Fprintln(out, "warning:", w)
-		}
+		r.Warnings = append(r.Warnings, ws...)
 	}
-	return nil
+	return r, nil
 }
 
 // runnerBridge says which bridge a runner's pool attaches it to.

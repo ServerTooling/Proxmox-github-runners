@@ -198,7 +198,9 @@ func TestActionsRunInTheBackgroundAndShowOutput(t *testing.T) {
 	s, srv, _, _ := settingsServer(t)
 	release := make(chan struct{})
 	runs := 0
-	s.Service.Status = func(_ context.Context, w io.Writer) error { _, err := io.WriteString(w, "2/4 runners"); return err }
+	s.Service.Status = func(context.Context) (*StatusReport, error) {
+		return &StatusReport{Version: "build-7", Host: "pve1", Max: 4, Runners: []RunnerRow{{ID: 9000, Name: "gh-pve1-default-9000"}}}, nil
+	}
 	s.Service.Actions = []Action{{Name: "pull", Label: "Pull images", Args: []string{"pool"},
 		Run: func(_ context.Context, w io.Writer, args map[string]string) error {
 			runs++
@@ -230,7 +232,8 @@ func TestActionsRunInTheBackgroundAndShowOutput(t *testing.T) {
 	}
 	waitFor("pulling for default")
 	// While it runs, the page refreshes itself and a second click starts nothing.
-	if p := page(); !strings.Contains(p, `http-equiv="refresh"`) || !strings.Contains(p, "running since") || !strings.Contains(p, "2/4 runners") {
+	if p := page(); !strings.Contains(p, "<body data-busy") || !strings.Contains(p, `http-equiv="refresh"`) ||
+		!strings.Contains(p, ">running</span> since") || !strings.Contains(p, "gh-pve1-default-9000") {
 		t.Fatalf("running page:\n%s", p)
 	}
 	c.PostForm(srv.URL+"/action/pull", url.Values{"pool": {"default"}})
@@ -238,5 +241,70 @@ func TestActionsRunInTheBackgroundAndShowOutput(t *testing.T) {
 	waitFor("error: disk full")
 	if runs != 1 {
 		t.Fatalf("ran %d times", runs)
+	}
+}
+
+// The page is tabs over one document: every tab, settings section and action has its panel and link.
+func TestSettingsPageTabs(t *testing.T) {
+	s, srv, _, _ := settingsServer(t)
+	s.Service.Actions = []Action{{Name: "a", Group: "Images", Label: "A", Run: func(context.Context, io.Writer, map[string]string) error { return nil }},
+		{Name: "b", Label: "B", Run: func(context.Context, io.Writer, map[string]string) error { return nil }}}
+	s.Service.Status = func(context.Context) (*StatusReport, error) { return nil, errors.New("pvesh failed") }
+	c := client(t)
+	c.PostForm(srv.URL+"/login", url.Values{"user": {"root@pam"}, "password": {"pw"}})
+	resp, _ := c.Get(srv.URL + "/")
+	b, _ := io.ReadAll(resp.Body)
+	p := string(b)
+	want := []string{"Status unavailable: pvesh failed", `id="action-a"`, `id="action-b"`, "<h2>Images</h2>", "<h2>Other</h2>",
+		`data-default="t-overview"`}
+	ids := []string{"t-overview", "t-actions", "t-settings", "s-orgs", "s-pools"}
+	for _, sec := range hostFields() {
+		ids = append(ids, "s-"+slug(sec.Title))
+	}
+	for _, id := range ids {
+		want = append(want, `id="`+id+`"`, `href="#`+id+`"`)
+	}
+	for _, w := range want {
+		if !strings.Contains(p, w) {
+			t.Errorf("page lacks %s", w)
+		}
+	}
+	if strings.Contains(p, "<body data-busy") {
+		t.Error("idle page reloads itself")
+	}
+	// A failed save opens on the settings tab, where the error is.
+	s.errMsg = "bad value"
+	resp, _ = c.Get(srv.URL + "/")
+	if b, _ := io.ReadAll(resp.Body); !strings.Contains(string(b), `data-default="t-settings"`) {
+		t.Error("a save error does not open the settings tab")
+	}
+}
+
+func TestSlug(t *testing.T) {
+	for in, want := range map[string]string{"Logs (Grafana Loki)": "logs-grafana-loki", "This host": "this-host", "GitHub": "github"} {
+		if got := slug(in); got != want {
+			t.Errorf("slug(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// The CLI prints the report as it always has.
+func TestStatusReportPrint(t *testing.T) {
+	r := &StatusReport{Version: "build-7", Host: "pve1", Max: 4, Storage: "local-zfs", Pending: []string{"9001 (expired)"},
+		Warnings: []string{"no gateway"}, Runners: []RunnerRow{{9000, "gh-pve1-default-9000", "running", "default", "example-org", "5s"}}}
+	var b strings.Builder
+	r.Print(&b)
+	want := `pve-runners build-7 on pve1: 1/4 runners
+ID    NAME                  STATUS   POOL     OWNER        AGE
+9000  gh-pve1-default-9000  running  default  example-org  5s
+pending cleanup: 9001 (expired)
+container storage: local-zfs
+warning: no gateway
+`
+	if b.String() != want {
+		t.Fatalf("got\n%s\nwant\n%s", b.String(), want)
+	}
+	if r.UsedPercent() != 25 {
+		t.Errorf("used %d%%", r.UsedPercent())
 	}
 }

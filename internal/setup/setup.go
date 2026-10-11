@@ -409,11 +409,6 @@ func render(w http.ResponseWriter, t *template.Template, data any) {
 	}
 }
 
-const page = `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>pve-runners setup</title><style>body{font:16px system-ui,sans-serif;max-width:40rem;margin:2rem auto;padding:0 1rem;line-height:1.5}
-fieldset{border:1px solid #ccc;border-radius:8px;margin:1rem 0;padding:1rem}input{font:inherit;padding:.3rem}pre{background:#f4f4f4;padding:.5rem;overflow-x:auto;font-size:13px}button{font:inherit;padding:.4rem .9rem}
-.err{background:#fde8e8;padding:.6rem;border-radius:6px}code{background:#eee;padding:0 .2rem}</style></head><body>`
-
 var indexTmpl = template.Must(template.New("index").Parse(page + `
 <h1>pve-runners setup</h1>
 {{if .Error}}<p class="err">{{.Error}}</p>{{end}}
