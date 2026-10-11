@@ -346,3 +346,56 @@ func TestSpawnWithoutCacheMountsNothing(t *testing.T) {
 		}
 	}
 }
+
+func TestDrainWaitsForTheRunningSpawnAndStopsNewOnes(t *testing.T) {
+	p, f, _ := setup(t)
+	p.Cfg.Network.Isolate = new(bool)
+	f.Delay = 20 * time.Millisecond
+	old := drainPoll
+	drainPoll = time.Millisecond
+	t.Cleanup(func() { drainPoll = old; draining.Store(false) })
+	jit := func(context.Context, string) (*github.JITConfig, error) {
+		return &github.JITConfig{EncodedJITConfig: "x"}, nil
+	}
+	spawned := make(chan error, 1)
+	go func() {
+		_, err := p.Spawn(context.Background(), Request{Pool: "small", Target: org, JIT: jit})
+		spawned <- err
+	}()
+	for !Busy() {
+		time.Sleep(time.Millisecond)
+	}
+	release, err := Drain(context.Background(), 10*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-spawned:
+		if err != nil {
+			t.Fatalf("the running spawn should finish: %v", err)
+		}
+	default:
+		t.Fatal("Drain returned before the running spawn finished")
+	}
+	if _, err := p.Spawn(context.Background(), Request{Pool: "small", Target: org, JIT: jit}); !errors.Is(err, ErrDraining) {
+		t.Fatalf("want ErrDraining while drained, got %v", err)
+	}
+	release()
+	if _, err := p.Spawn(context.Background(), Request{Pool: "small", Target: org, JIT: jit}); err != nil {
+		t.Fatalf("spawns resume after release: %v", err)
+	}
+}
+
+func TestDrainGivesUpAndReleases(t *testing.T) {
+	old := drainPoll
+	drainPoll = time.Millisecond
+	t.Cleanup(func() { drainPoll = old })
+	inFlight.Add(1)
+	defer inFlight.Add(-1)
+	if _, err := Drain(context.Background(), 10*time.Millisecond); err == nil {
+		t.Fatal("want a timeout while a spawn never finishes")
+	}
+	if draining.Load() {
+		t.Fatal("a failed drain must not keep spawns stopped")
+	}
+}

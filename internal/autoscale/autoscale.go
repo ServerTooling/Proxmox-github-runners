@@ -364,6 +364,9 @@ func (l *Listener) scale(ctx context.Context, stats scaleset.Statistics) {
 			l.log().Info("at capacity", "listener", l.Name(), "want", want, "have", have, "reason", err)
 			return
 		}
+		if errors.Is(err, provision.ErrDraining) {
+			return // the service restarts for an update and spawns again after
+		}
 		if err != nil {
 			if ctx.Err() != nil {
 				return

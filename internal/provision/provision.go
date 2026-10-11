@@ -28,6 +28,38 @@ var inFlight atomic.Int32
 
 func Busy() bool { return inFlight.Load() > 0 }
 
+// draining stops new spawns so an update can restart between them. While jobs queue, spawns run back to
+// back, so waiting for a gap alone could put an update off for as long as the queue lasts.
+var draining atomic.Bool
+
+// ErrDraining refuses a spawn while an update waits to restart; the job stays queued on GitHub and the
+// restarted service spawns for it.
+var ErrDraining = errors.New("not starting runners while an update installs")
+
+// drainPoll is how often Drain checks whether the last spawn has finished.
+var drainPoll = 500 * time.Millisecond
+
+// Drain stops new spawns and waits up to timeout for running ones to finish. On success spawns stay
+// stopped until release is called (or the process restarts); on failure they are released again.
+func Drain(ctx context.Context, timeout time.Duration) (release func(), err error) {
+	draining.Store(true)
+	release = func() { draining.Store(false) }
+	deadline := time.Now().Add(timeout)
+	for inFlight.Load() > 0 {
+		if time.Now().After(deadline) {
+			release()
+			return nil, fmt.Errorf("a runner was still starting after %s", timeout)
+		}
+		select {
+		case <-ctx.Done():
+			release()
+			return nil, ctx.Err()
+		case <-time.After(drainPoll):
+		}
+	}
+	return release, nil
+}
+
 // JITSource is the slice of the GitHub client provisioning needs.
 type JITSource interface {
 	RunnerGroupID(ctx context.Context, inst int64, org, name string) (int64, error)
@@ -129,6 +161,11 @@ func (p *Provisioner) Spawn(ctx context.Context, req Request) (res *Result, err 
 	defer inFlight.Add(-1)
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	// Checked after inFlight is raised and after waiting our turn, so Drain either sees this spawn or
+	// this spawn sees Drain, including spawns that queued behind one already running.
+	if draining.Load() {
+		return nil, ErrDraining
+	}
 
 	pool, ok := p.Cfg.Pools[req.Pool]
 	if !ok {
