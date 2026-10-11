@@ -157,6 +157,24 @@ func TestDestroyRefusesGuestsItDoesNotOwn(t *testing.T) {
 	}
 }
 
+// A runner that powered itself off after its job, between the list and the stop, is still destroyed.
+func TestDestroyRunnerThatStoppedMeanwhile(t *testing.T) {
+	f := pvetest.New(pve.Guest{VMID: 9002, Type: "lxc", Status: "running", RawTags: "gh-runner"})
+	f.FailOn["pct stop 9002"] = errors.New("exit status 255: CT 9002 not running")
+	if err := host(f).Destroy(context.Background(), 9002); err != nil {
+		t.Fatal(err)
+	}
+	if got := f.Mutations(); !reflect.DeepEqual(got, []string{"pct stop 9002", "pct destroy 9002 --purge 1 --force 1"}) {
+		t.Fatalf("got %v", got)
+	}
+
+	f = pvetest.New(pve.Guest{VMID: 9002, Type: "lxc", Status: "running", RawTags: "gh-runner"})
+	f.FailOn["pct stop 9002"] = errors.New("exit status 255: some other failure")
+	if err := host(f).Destroy(context.Background(), 9002); err == nil {
+		t.Fatal("want other stop failures returned")
+	}
+}
+
 // Without /proc (or MemAvailable in it) the node's own figure is used.
 func TestFreeMemoryFallsBackToNodeStatus(t *testing.T) {
 	f := pvetest.New()
