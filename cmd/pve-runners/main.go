@@ -820,7 +820,22 @@ func cmdStatus(ctx context.Context, out io.Writer, cfgPath string) error {
 	if on, err := h.ClusterFirewallEnabled(ctx); err == nil && !on && cfg.Network.Isolated() {
 		fmt.Fprintln(out, "warning: the datacenter firewall is off; runners cannot be isolated from the LAN, so spawning is refused")
 	}
+	if ws, _, err := h.GatewayWarnings(ctx, runnerBridge(cfg)); err == nil {
+		for _, w := range ws {
+			fmt.Fprintln(out, "warning:", w)
+		}
+	}
 	return nil
+}
+
+// runnerBridge says which bridge a runner's pool attaches it to.
+func runnerBridge(cfg *config.Config) func(pve.Guest) string {
+	return func(g pve.Guest) string {
+		if p, ok := cfg.Pools[g.TagValue("pool")]; ok {
+			return p.Bridge
+		}
+		return ""
+	}
 }
 
 func cmdTemplatePrepare(ctx context.Context, w io.Writer, cfgPath string, ctid int) error {
@@ -947,6 +962,26 @@ func cmdRun(ctx context.Context, cfgPath string) error {
 		}()
 	}
 
+	// The gateway check needs a running runner, so it is tried each reconcile round until one could be
+	// checked, then once per image check.
+	var gatewayBusy, gatewayChecked atomic.Bool
+	checkGateway := func(cfg *config.Config) {
+		if !gatewayBusy.CompareAndSwap(false, true) {
+			return
+		}
+		go func() {
+			defer gatewayBusy.Store(false)
+			ws, checked, err := host(cfg).GatewayWarnings(ctx, runnerBridge(cfg))
+			if err != nil || checked == 0 {
+				return
+			}
+			gatewayChecked.Store(true)
+			for _, w := range ws {
+				slog.Warn(w)
+			}
+		}()
+	}
+
 	// Shipping runs beside the loop so a slow log endpoint never delays reconcile. Repeated failures
 	// are logged once per distinct error: each logged line would itself be shipped next round.
 	// Which runner runs which job, as the listeners hear it; it outlives reloads so labels survive them.
@@ -1021,10 +1056,14 @@ func cmdRun(ctx context.Context, cfgPath string) error {
 		case <-imageTick.C:
 			syncImagesAsync(cfg)
 			trimCaches(cfg)
+			checkGateway(cfg)
 		case <-logsTick.C:
 			shipLogs()
 		case <-reconcileTick.C:
 			startScaler()
+			if !gatewayChecked.Load() {
+				checkGateway(cfg)
+			}
 			done, err := reconcile.Once(ctx, cfg, host(cfg), time.Now())
 			for _, a := range done {
 				slog.Info("destroyed runner", "vmid", a.VMID, "reason", a.Reason)

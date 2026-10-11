@@ -151,6 +151,16 @@ it yourself:
 max by (runner) (max_over_time({service="pve-runners-usage"} | json | unwrap mem_bytes [1m]))
 ```
 
+## Network troubleshooting
+
+If jobs stall in the middle of downloads (npm `ETIMEDOUT`, a checkout or `actions/cache` hanging for
+10 minutes), check that the host doesn't also hold the runners' gateway address on their bridge. With IP
+forwarding off, runners that resolve the gateway to the host lose their packets until the ARP entry
+flips back. The service checks this against a running runner and logs a warning (also shown in
+`pve-runners status`); the fix is on the host: make the bridge `inet manual` in
+`/etc/network/interfaces` and run `ifreload -a`. Clones and destroys that time out on Proxmox's
+storage lock while a slow ZFS destroy holds it are retried.
+
 ## Updates
 
 The service checks this repo's releases every 15 minutes. A newer build is downloaded, its

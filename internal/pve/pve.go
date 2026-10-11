@@ -240,8 +240,30 @@ type Host struct {
 
 var ErrNotOwned = errors.New("refusing to touch a guest this tool does not own")
 
+// Proxmox serializes storage changes (clone, resize, destroy) with a per-storage lock it waits 10s for.
+// A ZFS destroy can hold it far longer, so a command that runs alongside one fails before doing
+// anything; retrying it is safe and saves a lost spawn or a destroy left to the next cleanup round.
+var lockRetryDelay = 10 * time.Second
+
+const lockRetries = 5
+
+func storageLockTimeout(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "can't lock file '/var/lock/pve-manager/pve-storage-") &&
+		strings.Contains(err.Error(), "got timeout")
+}
+
 func (h *Host) run(ctx context.Context, c Cmd) ([]byte, error) {
-	return h.R.Run(ctx, c.Name, c.Args...)
+	for try := 0; ; try++ {
+		out, err := h.R.Run(ctx, c.Name, c.Args...)
+		if !storageLockTimeout(err) || try == lockRetries {
+			return out, err
+		}
+		select {
+		case <-ctx.Done():
+			return out, err
+		case <-time.After(lockRetryDelay):
+		}
+	}
 }
 
 // Output runs a read-only command and returns what it printed.
