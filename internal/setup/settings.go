@@ -231,10 +231,12 @@ func (s *Server) saveSettings(w http.ResponseWriter, r *http.Request) {
 	}
 	s.Cfg = next
 	s.mu.Unlock()
-	render(w, savedTmpl, nil)
+	// Saved only schedules the restart, so it runs before the response: the browser (and a test) may
+	// act on the "saved" page as soon as it arrives.
 	if s.Service.Saved != nil {
 		s.Service.Saved()
 	}
+	render(w, savedTmpl, nil)
 }
 
 func (s *Server) apply(form url.Values) (*config.Config, error) {
