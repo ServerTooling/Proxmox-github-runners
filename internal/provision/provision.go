@@ -303,13 +303,15 @@ func (p *Provisioner) Spawn(ctx context.Context, req Request) (res *Result, err 
 	if err = p.Host.Exec(ctx, pve.LXCStart(id)); err != nil {
 		return nil, err
 	}
-	if err = p.pushFile(ctx, id, jit.EncodedJITConfig, "/etc/gh-runner/jitconfig", "0600"); err != nil {
-		return nil, err
-	}
+	// The .env goes first: gh-runner.service is enabled at boot and starts as soon as the jitconfig
+	// exists, and the runner reads .env only when it starts, so a later .env left its job without the cache.
 	if pool.Cache {
 		if err = p.pushFile(ctx, id, cacheEnv, "/opt/actions-runner/.env", "0644"); err != nil {
 			return nil, err
 		}
+	}
+	if err = p.pushFile(ctx, id, jit.EncodedJITConfig, "/etc/gh-runner/jitconfig", "0600"); err != nil {
+		return nil, err
 	}
 	if err = p.Host.Exec(ctx, pve.LXCExec(id, "sh", "-c", startRunner)); err != nil {
 		return nil, err

@@ -371,9 +371,11 @@ func TestSpawnMountsTheOwnersCache(t *testing.T) {
 			t.Errorf(".env lacks %q:\n%s", want, env)
 		}
 	}
-	// The runner must be started after its .env is in place.
-	if last := m[len(m)-1]; !strings.HasPrefix(last, "pct exec 9000 -- sh -c ") || !strings.HasSuffix(m[len(m)-2], " /opt/actions-runner/.env --perms 0644") {
-		t.Errorf("order: %q", m[len(m)-2:])
+	// The .env must be in place before the jitconfig, which lets the runner start at boot.
+	if last := m[len(m)-1]; !strings.HasPrefix(last, "pct exec 9000 -- sh -c ") ||
+		!strings.HasSuffix(m[len(m)-2], " /etc/gh-runner/jitconfig --perms 0600") ||
+		!strings.HasSuffix(m[len(m)-3], " /opt/actions-runner/.env --perms 0644") {
+		t.Errorf("order: %q", m[len(m)-3:])
 	}
 }
 
