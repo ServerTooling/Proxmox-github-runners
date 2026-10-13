@@ -197,8 +197,8 @@ func (l Logs) UsageWanted() bool { return l.Usage == nil || *l.Usage }
 // UsageOn reports whether runner usage samples are sent along with the logs.
 func (l Logs) UsageOn() bool { return l.On() && l.UsageWanted() }
 
-// Web is the settings page the service serves over HTTPS with the Proxmox node's certificate. Logging
-// in takes a Proxmox account with Sys.Modify (root@pam has it); saving restarts the service.
+// Web is the API the service serves over HTTPS with the Proxmox node's certificate, for the Dell Server
+// Tools app. Requests carry a Proxmox token or ticket with Sys.Modify; saving restarts the service.
 type Web struct {
 	Enabled *bool  `yaml:"enabled,omitempty"` // default true
 	Listen  string `yaml:"listen"`

@@ -1,6 +1,9 @@
 package setup
 
 import (
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
@@ -24,6 +27,9 @@ const apiCheckTTL = time.Minute
 // apiMaxBody bounds a settings save; the whole config is a few kilobytes.
 const apiMaxBody = 1 << 20
 
+// linkTTL is how long a link to add an org or account works; it is opened right after it is made.
+const linkTTL = 15 * time.Minute
+
 func (s *Server) apiHandler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/v1/status", s.apiStatus)
@@ -32,6 +38,7 @@ func (s *Server) apiHandler() http.Handler {
 	mux.HandleFunc("GET /api/v1/actions", s.apiActions)
 	mux.HandleFunc("GET /api/v1/actions/{name}", s.apiAction)
 	mux.HandleFunc("POST /api/v1/actions/{name}", s.apiRunAction)
+	mux.HandleFunc("POST /api/v1/targets", s.apiAddTarget)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
 		if !s.apiAuthorized(r) {
@@ -48,7 +55,7 @@ func (s *Server) apiAuthorized(r *http.Request) bool {
 	if auth == "" || s.Service.Check == nil {
 		return false
 	}
-	key, now := sessionKey(auth), time.Now()
+	key, now := credKey(auth), time.Now()
 	s.mu.Lock()
 	until, ok := s.apiOK[key]
 	s.mu.Unlock()
@@ -67,6 +74,12 @@ func (s *Server) apiAuthorized(r *http.Request) bool {
 	}
 	s.apiOK[key] = now.Add(apiCheckTTL)
 	return true
+}
+
+// credKey keeps accepted credentials in memory only as a hash.
+func credKey(auth string) string {
+	sum := sha256.Sum256([]byte(auth))
+	return hex.EncodeToString(sum[:])
 }
 
 func apiJSON(w http.ResponseWriter, status int, v any) {
@@ -111,8 +124,7 @@ type apiSettingsView struct {
 	Sections []apiGroup `json:"sections"`
 	// Pools each end with a pool.<name>.delete box; new_pool adds one by name.
 	Pools []apiGroup `json:"pools"`
-	// Targets each end with a target.<i>.remove box. Adding one needs GitHub in a browser
-	// (`pve-runners setup`).
+	// Targets each end with a target.<i>.remove box. Adding one goes through POST /api/v1/targets.
 	Targets []apiGroup `json:"targets"`
 }
 
@@ -278,4 +290,62 @@ func (s *Server) apiRunAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	apiJSON(w, http.StatusAccepted, s.actionView(a))
+}
+
+// appLink is a pending "add an org or account" that the app asked for and the browser has yet to open.
+type appLink struct {
+	Owner string
+	Org   bool
+	Until time.Time
+}
+
+// apiAddTarget takes {"org": name} or {"user": name} and answers 201 with {"url": ...}, a one-time link
+// for the browser that starts creating the GitHub App, as the setup page's buttons do. The link is the
+// authorization: only someone the API accepted gets one, and it works once, briefly.
+func (s *Server) apiAddTarget(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Org  string `json:"org"`
+		User string `json:"user"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, apiMaxBody)).Decode(&body); err != nil {
+		apiError(w, http.StatusBadRequest, "expected {\"org\": ...} or {\"user\": ...}")
+		return
+	}
+	owner, org := strings.TrimSpace(body.Org), true
+	if owner == "" {
+		owner, org = strings.TrimSpace(body.User), false
+	}
+	if !ownerRe.MatchString(owner) {
+		apiError(w, http.StatusUnprocessableEntity, badOwner)
+		return
+	}
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		apiError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	key, now := hex.EncodeToString(b), time.Now()
+	s.mu.Lock()
+	for k, l := range s.links {
+		if now.After(l.Until) {
+			delete(s.links, k)
+		}
+	}
+	s.links[key] = appLink{Owner: owner, Org: org, Until: now.Add(linkTTL)}
+	s.mu.Unlock()
+	apiJSON(w, http.StatusCreated, map[string]string{"url": baseURL(r) + "/app/new?k=" + key})
+}
+
+// newAppFromLink opens a link from apiAddTarget in the browser, once.
+func (s *Server) newAppFromLink(w http.ResponseWriter, r *http.Request) {
+	key := r.URL.Query().Get("k")
+	s.mu.Lock()
+	l, ok := s.links[key]
+	delete(s.links, key)
+	s.mu.Unlock()
+	if !ok || time.Now().After(l.Until) {
+		http.Error(w, "This link has expired or was already used. Ask for a new one in the app.", http.StatusForbidden)
+		return
+	}
+	s.startApp(w, r, l.Owner, !l.Org)
 }

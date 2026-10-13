@@ -15,44 +15,10 @@ import (
 	"time"
 )
 
-var errLogin = errors.New("wrong user or password, or no Sys.Modify")
-
-// PVELogin checks credentials against the Proxmox API's ticket endpoint (normally the local pveproxy at
-// https://127.0.0.1:8006) and accepts only accounts with Sys.Modify on the nodes, the same right the
-// Proxmox UI requires to change host settings. The ticket itself is discarded.
-func PVELogin(base string, hc *http.Client) LoginFunc {
-	return func(ctx context.Context, user, password string) error {
-		form := url.Values{"username": {user}, "password": {password}}
-		req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(base, "/")+"/api2/json/access/ticket",
-			strings.NewReader(form.Encode()))
-		if err != nil {
-			return err
-		}
-		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-		resp, err := hc.Do(req)
-		if err != nil {
-			return fmt.Errorf("proxmox login: %w", err)
-		}
-		defer resp.Body.Close()
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-		var out struct {
-			Data *struct {
-				Ticket string                    `json:"ticket"`
-				Cap    map[string]map[string]int `json:"cap"`
-			} `json:"data"`
-		}
-		if resp.StatusCode != http.StatusOK || json.Unmarshal(body, &out) != nil || out.Data == nil || out.Data.Ticket == "" {
-			return errLogin
-		}
-		if out.Data.Cap["nodes"]["Sys.Modify"] != 1 {
-			return errLogin
-		}
-		return nil
-	}
-}
+var errLogin = errors.New("not a Proxmox token or ticket with Sys.Modify")
 
 // PinnedClient trusts exactly one certificate: the one pveproxy serves, read from the same file the
-// settings page uses. Hostname checks don't apply on loopback and the cert may be self-signed or
+// service serves. Hostname checks don't apply on loopback and the cert may be self-signed or
 // issued for the public name, so matching the exact certificate is the check that holds in every case.
 func PinnedClient(leaf []byte) *http.Client {
 	return &http.Client{Timeout: 15 * time.Second, Transport: &http.Transport{TLSClientConfig: &tls.Config{
@@ -72,8 +38,8 @@ func PinnedClient(leaf []byte) *http.Client {
 type CheckFunc func(ctx context.Context, authorization string) error
 
 // PVECheck asks the Proxmox API (normally the local pveproxy) for the caller's own permissions on the
-// node and requires Sys.Modify, the right PVELogin requires. Proxmox decides what a token or ticket is
-// worth (expiry, revocation, privilege separation), so this service keeps no credentials of its own.
+// node and requires Sys.Modify, the right the Proxmox UI requires to change host settings. Proxmox
+// decides what a token or ticket is worth (expiry, revocation, privilege separation), so this service keeps no credentials of its own.
 func PVECheck(base, node string, hc *http.Client) CheckFunc {
 	return func(ctx context.Context, authorization string) error {
 		path := "/nodes/" + node

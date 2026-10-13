@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"html"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -17,6 +18,7 @@ import (
 	"time"
 
 	"github.com/ServerTooling/proxmox-github-runners/internal/config"
+	"github.com/ServerTooling/proxmox-github-runners/internal/github/githubtest"
 )
 
 const goodToken = "PVEAPIToken=root@pam!app=secret"
@@ -101,7 +103,7 @@ func TestAPISettingsSaveThroughTheSamePath(t *testing.T) {
 		}
 	}
 	// Every setting the page has is in the API, with the same name.
-	for name := range browserForm(s.Cfg) {
+	for name := range currentValues(s.Cfg) {
 		if _, ok := values[name]; !ok {
 			t.Errorf("API lacks %s", name)
 		}
@@ -267,7 +269,7 @@ func TestPVECheckNeedsSysModify(t *testing.T) {
 func TestAPISecretsStayInSecretDir(t *testing.T) {
 	s, srv, _, _, _ := apiServer(t)
 	values := map[string]string{}
-	for k, v := range browserForm(s.Cfg) {
+	for k, v := range currentValues(s.Cfg) {
 		values[k] = v[0]
 	}
 	values["notify_url"] = "https://ntfy.example.com/topic"
@@ -276,5 +278,68 @@ func TestAPISecretsStayInSecretDir(t *testing.T) {
 	}
 	if filepath.Dir(s.Cfg.Notify.WebhookURLFile) != s.Service.SecretDir {
 		t.Fatalf("notify file at %s", s.Cfg.Notify.WebhookURLFile)
+	}
+}
+
+// Adding an org from the app: the API hands out a one-time link, the browser opens it and goes through
+// GitHub's App pages, and the service saves the new org and restarts.
+func TestAddTargetThroughAOneTimeLink(t *testing.T) {
+	gh := githubtest.New(42)
+	defer gh.Close()
+	gh.ManifestCodes["code123"] = true
+	gh.Installations = []map[string]any{{"id": 77, "account": map[string]string{"login": "example-org", "type": "Organization"}}}
+	s, srv, saved, path, _ := apiServer(t)
+	s.KeyDir = filepath.Join(t.TempDir(), "apps")
+	s.GitHubWeb = "https://github.example"
+	s.API = gh.URL
+	s.Cfg.Targets[0].Org = "first-org" // the fake GitHub creates Apps under example-org
+
+	if code, _ := apiDo(t, "POST", srv.URL+"/api/v1/targets", "PVEAPIToken=root@pam!app=wrong", map[string]string{"org": "example-org"}); code != 401 {
+		t.Fatalf("without credentials: %d", code)
+	}
+	if code, b := apiDo(t, "POST", srv.URL+"/api/v1/targets", goodToken, map[string]string{"org": "not an org"}); code != 422 {
+		t.Fatalf("bad name: %d %s", code, b)
+	}
+	code, b := apiDo(t, "POST", srv.URL+"/api/v1/targets", goodToken, map[string]string{"org": "example-org"})
+	var link struct{ URL string }
+	if code != 201 || json.Unmarshal(b, &link) != nil || !strings.HasPrefix(link.URL, srv.URL+"/app/new?k=") {
+		t.Fatalf("link: %d %s", code, b)
+	}
+
+	c := client(t)
+	if resp, _ := c.Get(srv.URL + "/app/new?k=guess"); resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("made-up link: %d", resp.StatusCode)
+	}
+	resp, _ := c.Get(link.URL)
+	body, _ := io.ReadAll(resp.Body)
+	if !strings.Contains(html.UnescapeString(string(body)), `action="https://github.example/organizations/example-org/settings/apps/new?state=`+s.Token+`"`) {
+		t.Fatalf("form to GitHub missing:\n%s", body)
+	}
+	if resp, _ := c.Get(link.URL); resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("link reused: %d", resp.StatusCode)
+	}
+
+	c.Get(srv.URL + "/app/created?code=code123&state=" + s.Token)
+	resp, _ = c.Get(srv.URL + "/app/installed?installation_id=77&setup_action=install")
+	if b, _ := io.ReadAll(resp.Body); resp.StatusCode != 200 || !strings.Contains(string(b), "go back to the app") || *saved != 1 {
+		t.Fatalf("installed: %d, restarts %d\n%s", resp.StatusCode, *saved, b)
+	}
+	got, err := config.Load(path)
+	if err != nil || len(got.Targets) != 2 || got.Targets[1].Org != "example-org" || got.Targets[1].InstallationID != 77 {
+		t.Fatalf("config: %v %+v", err, got.Targets)
+	}
+}
+
+// An error in the GitHub App pages is shown on the page they send the browser back to.
+func TestServicePageShowsAppErrors(t *testing.T) {
+	_, srv, _, _, _ := apiServer(t)
+	c := client(t)
+	resp, _ := c.Get(srv.URL + "/app/installed?installation_id=nope")
+	if loc := resp.Header.Get("Location"); loc != "/" {
+		t.Fatalf("redirect: %q", loc)
+	}
+	resp, _ = c.Get(srv.URL + "/")
+	if b, _ := io.ReadAll(resp.Body); !strings.Contains(string(b), "GitHub did not return an installation.") {
+		t.Fatalf("error not shown:\n%s", b)
 	}
 }

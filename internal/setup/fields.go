@@ -10,8 +10,8 @@ import (
 	"github.com/ServerTooling/proxmox-github-runners/internal/pve"
 )
 
-// field is one setting on the settings page. Every value round-trips through a string so the page is
-// one plain form; Parse validates the result as a whole before anything is saved.
+// field is one setting the app edits. Every value round-trips through a string so a save is one plain
+// set of values; Parse validates the result as a whole before anything is saved.
 type field struct {
 	Name    string // form name, the config key
 	Label   string
@@ -168,8 +168,8 @@ func hostFields() []section {
 				get: func(c *config.Config) string { return pinned(c, c.GitHub.RunnerSHA256) },
 				set: func(c *config.Config, v string) error { c.GitHub.Pin(c.GitHub.RunnerVersion, v); return nil }},
 		}},
-		{"Settings page", []field{
-			optBool("web.enabled", "Serve this page", "Turning it off takes effect after saving; turn it back on in the file.",
+		{"App access", []field{
+			optBool("web.enabled", "Serve the app's API", "Turning it off cuts off this app after saving; turn it back on in the config file.",
 				func(c *config.Config) **bool { return &c.Web.Enabled }),
 			text("web.listen", "Listen on", "[address]:port", func(c *config.Config) *string { return &c.Web.Listen }),
 		}},

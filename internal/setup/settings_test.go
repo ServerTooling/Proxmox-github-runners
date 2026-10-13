@@ -9,41 +9,33 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/ServerTooling/proxmox-github-runners/internal/config"
 )
 
-// browserForm is what the settings form posts unchanged: every field's current value, with checkboxes
-// present only when ticked.
-func browserForm(c *config.Config) url.Values {
+// currentValues is what the app sends back unchanged: every field's current value.
+func currentValues(c *config.Config) url.Values {
 	v := url.Values{}
 	for _, sec := range hostFields() {
 		for _, f := range sec.Fields {
-			if val := f.get(c); f.Kind != "bool" {
-				v.Set(f.Name, val)
-			} else if val == "true" {
-				v.Set(f.Name, "on")
-			}
+			v.Set(f.Name, f.get(c))
 		}
 	}
 	for _, name := range c.PoolNames() {
 		for _, f := range poolFields() {
-			if val := f.get(c.Pools[name]); f.Kind != "bool" {
-				v.Set("pool."+name+"."+f.Key, val)
-			} else if val == "true" {
-				v.Set("pool."+name+"."+f.Key, "on")
-			}
+			v.Set("pool."+name+"."+f.Key, f.get(c.Pools[name]))
 		}
 	}
 	for i, t := range c.Targets {
-		v.Set("target."+string(rune('0'+i))+".pools", strings.Join(t.Pools, ", "))
+		v.Set("target."+strconv.Itoa(i)+".pools", strings.Join(t.Pools, ", "))
 	}
 	return v
 }
 
+// settingsServer is the service with a config holding one org; goodToken passes its credential check.
 func settingsServer(t *testing.T) (*Server, *httptest.Server, *int, string) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.yaml")
@@ -59,8 +51,8 @@ func settingsServer(t *testing.T) (*Server, *httptest.Server, *int, string) {
 	saved := 0
 	s, _ := NewServer(cfg, path)
 	s.Service = &Service{SecretDir: dir, Saved: func() { saved++ },
-		Login: func(_ context.Context, user, pw string) error {
-			if user == "root@pam" && pw == "pw" {
+		Check: func(_ context.Context, auth string) error {
+			if auth == goodToken {
 				return nil
 			}
 			return errors.New("no")
@@ -70,43 +62,52 @@ func settingsServer(t *testing.T) (*Server, *httptest.Server, *int, string) {
 	return s, srv, &saved, path
 }
 
-func TestSettingsNeedAProxmoxLogin(t *testing.T) {
-	_, srv, _, _ := settingsServer(t)
+// save sends values as the app's settings save does.
+func save(t *testing.T, srv *httptest.Server, values url.Values) (int, string) {
+	t.Helper()
+	m := map[string]string{}
+	for k := range values {
+		m[k] = values.Get(k)
+	}
+	code, b := apiDo(t, "PUT", srv.URL+"/api/v1/settings", goodToken, map[string]any{"values": m})
+	return code, string(b)
+}
+
+// A browser gets a pointer to the app and nothing else: no login, no settings, no cookies.
+func TestServiceServesNoSettingsPage(t *testing.T) {
+	s, srv, saved, path := settingsServer(t)
+	old := filepath.Join(s.Service.SecretDir, oldSessionFile)
+	before, _ := os.ReadFile(path)
 	c := client(t)
-	if resp, _ := c.Get(srv.URL + "/"); resp.Header.Get("Location") != "/login" {
-		t.Fatalf("not logged in: %d %q", resp.StatusCode, resp.Header.Get("Location"))
+	resp, err := c.Get(srv.URL + "/")
+	if err != nil {
+		t.Fatal(err)
 	}
-	// The one-time setup token is not a way in.
-	if resp, _ := c.PostForm(srv.URL+"/settings", url.Values{}); resp.Header.Get("Location") != "/login" {
-		t.Fatalf("save without login: %d", resp.StatusCode)
+	b, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != 200 || !strings.Contains(string(b), "Dell Server Tools app") || strings.Contains(string(b), "<form") ||
+		len(resp.Cookies()) != 0 || resp.Header.Get("X-Frame-Options") != "DENY" {
+		t.Fatalf("/: %d %v\n%s", resp.StatusCode, resp.Cookies(), b)
 	}
-	if resp, _ := c.PostForm(srv.URL+"/login", url.Values{"user": {"root"}, "password": {"nope"}}); resp.Header.Get("Location") != "/login?e=1" {
-		t.Fatalf("wrong password: %q", resp.Header.Get("Location"))
-	}
-	// A bare user name means the pam realm, as in the Proxmox UI.
-	if resp, _ := c.PostForm(srv.URL+"/login", url.Values{"user": {"root"}, "password": {"pw"}}); resp.Header.Get("Location") != "/" {
-		t.Fatalf("login: %q", resp.Header.Get("Location"))
-	}
-	resp, _ := c.Get(srv.URL + "/")
-	body, _ := io.ReadAll(resp.Body)
-	for _, want := range []string{`name="proxmox.max_runners" value="4"`, `name="pool.default.cores" value="4"`, "Org example-org",
-		`name="loki_token"`} {
-		if !strings.Contains(string(body), want) {
-			t.Errorf("page lacks %s", want)
+	for _, p := range []string{"/settings", "/login", "/logout", "/action/pull", "/app/new"} {
+		if resp, _ := c.PostForm(srv.URL+p, url.Values{"org": {"example-org"}}); resp.StatusCode != http.StatusNotFound &&
+			resp.StatusCode != http.StatusMethodNotAllowed {
+			t.Errorf("POST %s: %d", p, resp.StatusCode)
 		}
 	}
-	c.PostForm(srv.URL+"/logout", nil)
-	if resp, _ := c.Get(srv.URL + "/"); resp.Header.Get("Location") != "/login" {
-		t.Fatal("still logged in after logout")
+	if after, _ := os.ReadFile(path); string(after) != string(before) || *saved != 0 {
+		t.Fatal("config changed without the API")
+	}
+	// The old page's login file goes when the service starts.
+	os.WriteFile(old, []byte("{}"), 0o600)
+	s.Handler()
+	if _, err := os.Stat(old); !os.IsNotExist(err) {
+		t.Fatalf("old session file kept: %v", err)
 	}
 }
 
 func TestSettingsSaveWritesConfigAndSecretsThenRestarts(t *testing.T) {
 	s, srv, saved, path := settingsServer(t)
-	c := client(t)
-	c.PostForm(srv.URL+"/login", url.Values{"user": {"root@pam"}, "password": {"pw"}})
-
-	form := browserForm(s.Cfg)
+	form := currentValues(s.Cfg)
 	form.Set("proxmox.max_runners", "8")
 	form.Set("pool.default.max", "8")
 	form.Set("network.allow", "udp/53, tcp/53@192.0.2.1")
@@ -114,11 +115,9 @@ func TestSettingsSaveWritesConfigAndSecretsThenRestarts(t *testing.T) {
 	form.Set("logs.user", "123")
 	form.Set("loki_token", "glc_secret")
 	form.Set("new_pool", "big")
-	form.Del("autoscale.enabled") // unticked
-	resp, _ := c.PostForm(srv.URL+"/settings", form)
-	if resp.StatusCode != 200 || *saved != 1 {
-		b, _ := io.ReadAll(resp.Body)
-		t.Fatalf("save: %d, restarts %d, error %q\n%s", resp.StatusCode, *saved, s.errMsg, b)
+	form.Set("autoscale.enabled", "false")
+	if code, b := save(t, srv, form); code != 200 || *saved != 1 {
+		t.Fatalf("save: %d, restarts %d: %s", code, *saved, b)
 	}
 	got, err := config.Load(path)
 	if err != nil {
@@ -140,38 +139,19 @@ func TestSettingsSaveWritesConfigAndSecretsThenRestarts(t *testing.T) {
 	if data, _ := os.ReadFile(path); strings.Contains(string(data), "glc_secret") {
 		t.Fatal("the token leaked into the config file")
 	}
-	// The page shows the token is set, never the token itself.
-	resp, _ = c.Get(srv.URL + "/")
-	if b, _ := io.ReadAll(resp.Body); strings.Contains(string(b), "glc_secret") || !strings.Contains(string(b), "set; leave empty to keep") {
-		t.Fatal("secret shown on the page, or its state missing")
-	}
 }
 
-func TestSettingsRejectInvalidAndCrossSiteSaves(t *testing.T) {
+func TestSettingsRejectInvalidSaves(t *testing.T) {
 	s, srv, saved, path := settingsServer(t)
 	before, _ := os.ReadFile(path)
-	c := client(t)
-	c.PostForm(srv.URL+"/login", url.Values{"user": {"root@pam"}, "password": {"pw"}})
-
-	form := browserForm(s.Cfg)
+	form := currentValues(s.Cfg)
 	form.Set("proxmox.max_runners", "100000")
-	c.PostForm(srv.URL+"/settings", form)
-	resp, _ := c.Get(srv.URL + "/")
-	b, _ := io.ReadAll(resp.Body)
-	if !strings.Contains(string(b), "max_runners") || *saved != 0 {
-		t.Fatalf("invalid save accepted (restarts %d)", *saved)
+	if code, b := save(t, srv, form); code != 422 || !strings.Contains(b, "max_runners") {
+		t.Fatalf("too many runners: %d %s", code, b)
 	}
 	form.Set("proxmox.max_runners", "abc")
-	c.PostForm(srv.URL+"/settings", form)
-	if !strings.Contains(s.errMsg, "whole number") {
-		t.Fatalf("error %q", s.errMsg)
-	}
-
-	req, _ := http.NewRequest("POST", srv.URL+"/settings", strings.NewReader(browserForm(s.Cfg).Encode()))
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	req.Header.Set("Origin", "https://evil.example")
-	if resp, _ := c.Do(req); resp.StatusCode != http.StatusForbidden {
-		t.Fatalf("cross-site save: %d", resp.StatusCode)
+	if code, b := save(t, srv, form); code != 422 || !strings.Contains(b, "whole number") {
+		t.Fatalf("not a number: %d %s", code, b)
 	}
 	if after, _ := os.ReadFile(path); string(after) != string(before) || *saved != 0 {
 		t.Fatal("config changed by a rejected save")
@@ -182,101 +162,15 @@ func TestSettingsRemoveTargetAndDeletePool(t *testing.T) {
 	s, srv, _, path := settingsServer(t)
 	s.Cfg.Pools["extra"] = &config.Pool{Type: "lxc", Image: "ubuntu-latest", Mode: "ephemeral", Labels: []string{"x"},
 		Cores: 1, MemoryMB: 512, DiskGB: 20, Max: 1}
-	c := client(t)
-	c.PostForm(srv.URL+"/login", url.Values{"user": {"root@pam"}, "password": {"pw"}})
-	form := browserForm(s.Cfg)
-	form.Set("pool.extra.delete", "on")
-	form.Set("target.0.remove", "on")
-	c.PostForm(srv.URL+"/settings", form)
+	form := currentValues(s.Cfg)
+	form.Set("pool.extra.delete", "true")
+	form.Set("target.0.remove", "true")
+	if code, b := save(t, srv, form); code != 200 {
+		t.Fatalf("save: %d %s", code, b)
+	}
 	got, err := config.Load(path)
 	if err != nil || len(got.Targets) != 0 || got.Pools["extra"] != nil {
-		t.Fatalf("%v %q %+v", err, s.errMsg, got)
-	}
-}
-
-func TestActionsRunInTheBackgroundAndShowOutput(t *testing.T) {
-	s, srv, _, _ := settingsServer(t)
-	release := make(chan struct{})
-	runs := 0
-	s.Service.Status = func(context.Context) (*StatusReport, error) {
-		return &StatusReport{Version: "build-7", Host: "pve1", Max: 4, Runners: []RunnerRow{{ID: 9000, Name: "gh-pve1-default-9000"}}}, nil
-	}
-	s.Service.Actions = []Action{{Name: "pull", Label: "Pull images", Args: []string{"pool"},
-		Run: func(_ context.Context, w io.Writer, args map[string]string) error {
-			runs++
-			io.WriteString(w, "pulling for "+args["pool"]+"\n")
-			<-release
-			return errors.New("disk full")
-		}}}
-	c := client(t)
-	c.PostForm(srv.URL+"/login", url.Values{"user": {"root@pam"}, "password": {"pw"}})
-	if resp, _ := c.PostForm(srv.URL+"/action/nope", nil); resp.StatusCode != 404 {
-		t.Fatalf("unknown action: %d", resp.StatusCode)
-	}
-	if resp, _ := c.PostForm(srv.URL+"/action/pull", url.Values{"pool": {"default"}}); resp.Header.Get("Location") != "/#action-pull" {
-		t.Fatalf("start: %q", resp.Header.Get("Location"))
-	}
-	page := func() string {
-		resp, _ := c.Get(srv.URL + "/")
-		b, _ := io.ReadAll(resp.Body)
-		return string(b)
-	}
-	waitFor := func(want string) {
-		deadline := time.Now().Add(5 * time.Second)
-		for !strings.Contains(page(), want) {
-			if time.Now().After(deadline) {
-				t.Fatalf("page never showed %q:\n%s", want, page())
-			}
-			time.Sleep(10 * time.Millisecond)
-		}
-	}
-	waitFor("pulling for default")
-	// While it runs, the page refreshes itself and a second click starts nothing.
-	if p := page(); !strings.Contains(p, "<body data-busy") || !strings.Contains(p, `http-equiv="refresh"`) ||
-		!strings.Contains(p, ">running</span> since") || !strings.Contains(p, "gh-pve1-default-9000") {
-		t.Fatalf("running page:\n%s", p)
-	}
-	c.PostForm(srv.URL+"/action/pull", url.Values{"pool": {"default"}})
-	close(release)
-	waitFor("error: disk full")
-	if runs != 1 {
-		t.Fatalf("ran %d times", runs)
-	}
-}
-
-// The page is tabs over one document: every tab, settings section and action has its panel and link.
-func TestSettingsPageTabs(t *testing.T) {
-	s, srv, _, _ := settingsServer(t)
-	s.Service.Actions = []Action{{Name: "a", Group: "Images", Label: "A", Run: func(context.Context, io.Writer, map[string]string) error { return nil }},
-		{Name: "b", Label: "B", Run: func(context.Context, io.Writer, map[string]string) error { return nil }}}
-	s.Service.Status = func(context.Context) (*StatusReport, error) { return nil, errors.New("pvesh failed") }
-	c := client(t)
-	c.PostForm(srv.URL+"/login", url.Values{"user": {"root@pam"}, "password": {"pw"}})
-	resp, _ := c.Get(srv.URL + "/")
-	b, _ := io.ReadAll(resp.Body)
-	p := string(b)
-	want := []string{"Status unavailable: pvesh failed", `id="action-a"`, `id="action-b"`, "<h2>Images</h2>", "<h2>Other</h2>",
-		`data-default="t-overview"`}
-	ids := []string{"t-overview", "t-actions", "t-settings", "s-orgs", "s-pools"}
-	for _, sec := range hostFields() {
-		ids = append(ids, "s-"+slug(sec.Title))
-	}
-	for _, id := range ids {
-		want = append(want, `id="`+id+`"`, `href="#`+id+`"`)
-	}
-	for _, w := range want {
-		if !strings.Contains(p, w) {
-			t.Errorf("page lacks %s", w)
-		}
-	}
-	if strings.Contains(p, "<body data-busy") {
-		t.Error("idle page reloads itself")
-	}
-	// A failed save opens on the settings tab, where the error is.
-	s.errMsg = "bad value"
-	resp, _ = c.Get(srv.URL + "/")
-	if b, _ := io.ReadAll(resp.Body); !strings.Contains(string(b), `data-default="t-settings"`) {
-		t.Error("a save error does not open the settings tab")
+		t.Fatalf("%v %+v", err, got)
 	}
 }
 
