@@ -273,6 +273,50 @@ func TestStorageChangeMovesTheTemplate(t *testing.T) {
 	}
 }
 
+func TestConcurrentManagersCreateOneTemplate(t *testing.T) {
+	f := newFixture(t)
+	f.publish("template-ubuntu-latest-20261008-2", "ubuntu-latest", now-100000, false)
+	other := *f.m // the image sync and a spawn each build their own Manager
+	ids := make(chan int, 2)
+	for _, m := range []*Manager{f.m, &other} {
+		go func() {
+			id, err := m.Ensure(context.Background(), ParseRef("ubuntu-latest"))
+			if err != nil {
+				t.Error(err)
+			}
+			ids <- id
+		}()
+	}
+	if a, b := <-ids, <-ids; a != 8900 || b != 8900 {
+		t.Fatalf("templates %d and %d", a, b)
+	}
+	creates := 0
+	for _, m := range f.pve.Mutations() {
+		if strings.HasPrefix(m, "pct create ") {
+			creates++
+		}
+	}
+	if creates != 1 {
+		t.Fatalf("%d templates created: %q", creates, f.pve.Mutations())
+	}
+}
+
+func TestPruneRemovesDuplicateTemplates(t *testing.T) {
+	tpl := func(id int, at int64) pve.Guest {
+		return pve.Guest{VMID: id, Type: "lxc", Template: 1,
+			RawTags: fmt.Sprintf("gh-template;image-ubuntu-latest;rel-ubuntu-latest-20261008-2;store-local-lvm;created-%d", at)}
+	}
+	f := newFixture(t, tpl(8900, now-60), tpl(8901, now-10), tpl(8902, now-100))
+	removed, err := f.m.Prune(context.Background(), []Ref{ParseRef("ubuntu-latest")}, []int{8902})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(removed) != 1 || removed[0].What != "template 8900 (ubuntu-latest-20261008-2)" ||
+		removed[0].Reason != "a newer copy of the same release exists" {
+		t.Fatalf("removed %+v", removed)
+	}
+}
+
 func TestDestroyTemplateRefusesGuestsItDoesNotOwn(t *testing.T) {
 	f := newFixture(t, pve.Guest{VMID: 8900, Type: "lxc", Template: 1, RawTags: "something-else"},
 		pve.Guest{VMID: 9001, Type: "lxc", Template: 1, RawTags: "gh-template"})

@@ -75,9 +75,11 @@ type Manager struct {
 	RootfsGB     int
 	Retention    time.Duration
 	Now          func() time.Time
-
-	mu sync.Mutex // one image download or template creation at a time
 }
+
+// syncMu allows one image download or template creation at a time across every Manager: the image
+// sync and each spawn build their own, and two of them must not both create the same template.
+var syncMu sync.Mutex
 
 func (m *Manager) now() time.Time {
 	if m.Now != nil {
@@ -289,8 +291,8 @@ func newestTemplate(tpls []pve.Guest, name, release string) *pve.Guest {
 // when needed. If GitHub can't be reached, an unpinned ref falls back to the newest local template
 // so runners keep working offline.
 func (m *Manager) Ensure(ctx context.Context, ref Ref) (int, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	syncMu.Lock()
+	defer syncMu.Unlock()
 	tpls, err := m.Host.Templates(ctx, m.Range)
 	if err != nil {
 		return 0, err
@@ -355,8 +357,8 @@ type Removed struct {
 // newest template of an image, a template a pinned ref needs, or a template that runners were cloned
 // from (inUse, from the runners' from-<id> tags); Proxmox would refuse that last one anyway.
 func (m *Manager) Prune(ctx context.Context, refs []Ref, inUse []int) ([]Removed, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	syncMu.Lock()
+	defer syncMu.Unlock()
 	tpls, err := m.Host.Templates(ctx, m.Range)
 	if err != nil {
 		return nil, err
@@ -371,6 +373,13 @@ func (m *Manager) Prune(ctx context.Context, refs []Ref, inUse []int) ([]Removed
 		names[g.TagValue("image")] = true
 	}
 	here := onStorage(tpls, m.Storage)
+	// Of several finished templates of one release on this storage, only the newest is needed.
+	dup := map[int]bool{}
+	for _, g := range here {
+		if best := newestTemplate(here, g.TagValue("image"), TagPrefix+g.TagValue("rel")); g.Template == 1 && best.VMID != g.VMID {
+			dup[g.VMID] = true
+		}
+	}
 	for n := range names {
 		g := newestTemplate(here, n, "")
 		if g == nil {
@@ -397,7 +406,7 @@ func (m *Manager) Prune(ctx context.Context, refs []Ref, inUse []int) ([]Removed
 	for _, g := range tpls {
 		// A template whose creation was interrupted (never converted) is always cleaned up.
 		moved := g.TagValue("store") != m.Storage
-		if keep[g.VMID] || (g.Template == 1 && created(g) > cutoff && !moved) {
+		if keep[g.VMID] || (g.Template == 1 && created(g) > cutoff && !moved && !dup[g.VMID]) {
 			keptRels[g.TagValue("rel")] = true
 			continue
 		}
@@ -412,6 +421,8 @@ func (m *Manager) Prune(ctx context.Context, refs []Ref, inUse []int) ([]Removed
 			reason = "incomplete template"
 		case moved:
 			reason = "not on proxmox.storage " + m.Storage
+		case dup[g.VMID]:
+			reason = "a newer copy of the same release exists"
 		}
 		removed = append(removed, Removed{fmt.Sprintf("template %d (%s)", g.VMID, g.TagValue("rel")), reason})
 	}
