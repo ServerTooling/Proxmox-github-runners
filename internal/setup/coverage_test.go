@@ -1,8 +1,7 @@
 package setup
 
 import (
-	"io"
-	"net/url"
+	"encoding/json"
 	"reflect"
 	"sort"
 	"strings"
@@ -11,7 +10,7 @@ import (
 	"github.com/ServerTooling/proxmox-github-runners/internal/config"
 )
 
-// notOnThePage are config keys the settings page sets another way, or deliberately leaves alone.
+// notOnThePage are config keys the app sets another way, or deliberately leaves alone.
 var notOnThePage = map[string]string{
 	"version":                    "written by config migration",
 	"notify.webhook_url_file":    "the page takes the URL itself and writes the file",
@@ -144,23 +143,15 @@ var changedPool = map[string]string{
 // on the page again as it was entered.
 func TestEveryFieldSavesAndShowsAgain(t *testing.T) {
 	s, srv, saved, path := settingsServer(t)
-	c := client(t)
-	c.PostForm(srv.URL+"/login", url.Values{"user": {"root@pam"}, "password": {"pw"}})
-
 	before := s.Cfg
-	form := browserForm(before)
+	form := currentValues(before)
 	want := map[string]string{}
 	for _, sec := range hostFields() {
 		for _, f := range sec.Fields {
 			if f.Kind == "bool" {
-				// Flip every checkbox.
-				if f.get(before) == "true" {
-					form.Del(f.Name)
-					want[f.Name] = "false"
-				} else {
-					form.Set(f.Name, "on")
-					want[f.Name] = "true"
-				}
+				// Flip every switch.
+				want[f.Name] = map[string]string{"true": "false", "false": "true"}[f.get(before)]
+				form.Set(f.Name, want[f.Name])
 				continue
 			}
 			v, ok := changed[f.Name]
@@ -182,13 +173,8 @@ func TestEveryFieldSavesAndShowsAgain(t *testing.T) {
 	for _, f := range poolFields() {
 		name := "pool.default." + f.Key
 		if f.Kind == "bool" {
-			if f.get(before.Pools["default"]) == "true" {
-				form.Del(name)
-				want[name] = "false"
-			} else {
-				form.Set(name, "on")
-				want[name] = "true"
-			}
+			want[name] = map[string]string{"true": "false", "false": "true"}[f.get(before.Pools["default"])]
+			form.Set(name, want[name])
 			continue
 		}
 		v, ok := changedPool[f.Key]
@@ -203,12 +189,8 @@ func TestEveryFieldSavesAndShowsAgain(t *testing.T) {
 		return
 	}
 	form.Set("loki_token", "glc_test") // logs.url needs a token
-	resp, err := c.PostForm(srv.URL+"/settings", form)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if b, _ := io.ReadAll(resp.Body); resp.StatusCode != 200 || *saved != 1 {
-		t.Fatalf("save: %d, restarts %d, error %q\n%s", resp.StatusCode, *saved, s.errMsg, b)
+	if code, b := save(t, srv, form); code != 200 || *saved != 1 {
+		t.Fatalf("save: %d, restarts %d: %s", code, *saved, b)
 	}
 	got, err := config.Load(path)
 	if err != nil {
@@ -227,33 +209,29 @@ func TestEveryFieldSavesAndShowsAgain(t *testing.T) {
 		}
 	}
 
-	// The page after the restart shows what was saved.
+	// The app, reading the settings after the restart, shows what was saved.
 	s.Cfg = got
-	resp, err = c.Get(srv.URL + "/")
-	if err != nil {
-		t.Fatal(err)
+	code, b := apiDo(t, "GET", srv.URL+"/api/v1/settings", goodToken, nil)
+	var view apiSettingsView
+	if code != 200 || json.Unmarshal(b, &view) != nil {
+		t.Fatalf("settings: %d %s", code, b)
 	}
-	page, _ := io.ReadAll(resp.Body)
+	shown := map[string]string{}
+	for _, groups := range [][]apiGroup{view.Sections, view.Pools} {
+		for _, g := range groups {
+			for _, f := range g.Fields {
+				shown[f.Name] = f.Value
+			}
+		}
+	}
 	names := make([]string, 0, len(want))
 	for k := range want {
 		names = append(names, k)
 	}
 	sort.Strings(names)
 	for _, k := range names {
-		v := want[k]
-		switch v {
-		case "true":
-			if !hasInput(string(page), k, "checked") {
-				t.Errorf("page does not show %s ticked", k)
-			}
-		case "false":
-			if hasInput(string(page), k, "checked") {
-				t.Errorf("page shows %s ticked", k)
-			}
-		default:
-			if !strings.Contains(string(page), `name="`+k+`"`) || !strings.Contains(string(page), escape(v)) {
-				t.Errorf("page does not show %s = %q", k, v)
-			}
+		if shown[k] != want[k] {
+			t.Errorf("app shows %s = %q, want %q", k, shown[k], want[k])
 		}
 	}
 }
@@ -265,20 +243,4 @@ func contains(xs []string, x string) bool {
 		}
 	}
 	return false
-}
-
-// hasInput reports whether the tag of the input named name contains attr.
-func hasInput(page, name, attr string) bool {
-	i := strings.Index(page, `name="`+name+`"`)
-	if i < 0 {
-		return false
-	}
-	start := strings.LastIndex(page[:i], "<")
-	end := strings.Index(page[i:], ">")
-	return start >= 0 && end >= 0 && strings.Contains(page[start:i+end], attr)
-}
-
-func escape(v string) string {
-	r := strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;", `"`, "&#34;", "'", "&#39;", "+", "&#43;")
-	return r.Replace(v)
 }

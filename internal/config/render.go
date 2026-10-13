@@ -259,9 +259,9 @@ logs:
   usage: {{.Logs.UsageWanted}}
 
 web:
-  # Settings page served by the service at https://<this host>:<port>, with the Proxmox UI's
-  # certificate. Log in with a Proxmox account that has Sys.Modify (root@pam); saving restarts the
-  # service. With the Proxmox firewall on and input policy DROP, allow this port on the host.
+  # API for the Dell Server Tools app, served by the service at https://<this host>:<port> with the
+  # Proxmox UI's certificate. The app sends a Proxmox token or ticket with Sys.Modify; saving restarts
+  # the service. With the Proxmox firewall on and input policy DROP, allow this port on the host.
   enabled: {{.Web.On}}
   listen: {{q .Web.Listen}}
 

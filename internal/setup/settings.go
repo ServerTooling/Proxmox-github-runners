@@ -2,8 +2,6 @@ package setup
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"net/http"
@@ -16,188 +14,57 @@ import (
 	"github.com/ServerTooling/proxmox-github-runners/internal/config"
 )
 
-// The settings page is the setup page served permanently by the service. Instead of the one-time
-// setup token it asks for a Proxmox login, since anyone who can change these settings controls a root
-// service; Login checks the credentials with the local Proxmox API.
+// In the service the server is the JSON API the DellServerTools app uses for status, settings and
+// actions (api.go). A browser only gets a note at / pointing to the app, and the GitHub App pages for
+// adding an org or account, which start from a one-time link the app asks the API for: creating the App
+// happens on github.com, so it needs a browser where the user is logged in to GitHub.
 
-const sessionCookie = "pve_runners_session"
-
-// sessionTTL is how long a login lasts without being used; each visit extends it, so a browser that
-// keeps using the page stays logged in until it logs out. Logins survive restarts (see sessions.go).
-const sessionTTL = 7 * 24 * time.Hour
-
-// LoginFunc returns nil when user and password are a Proxmox account allowed to change this host.
-type LoginFunc func(ctx context.Context, user, password string) error
-
-// Service turns the server into the always-on settings page.
+// Service turns the server into the always-on API.
 type Service struct {
-	Login LoginFunc
 	// Check accepts the app's Proxmox credentials for the JSON API (see api.go).
 	Check CheckFunc
 	// Saved runs after a successful save, to restart the service with the new settings.
 	Saved func()
-	// SecretDir holds the files the page writes secrets to (the notify URL and the Loki token).
+	// SecretDir holds the files secrets are written to (the notify URL and the Loki token).
 	SecretDir string
-	// FailDelay slows down wrong passwords.
+	// FailDelay slows down wrong credentials.
 	FailDelay time.Duration
-	// Status reports what `pve-runners status` does, shown on the page's overview.
+	// Status reports what `pve-runners status` does, for the app's overview.
 	Status func(ctx context.Context) (*StatusReport, error)
-	// Actions are the CLI commands offered as buttons.
+	// Actions are the CLI commands the app offers as buttons.
 	Actions []Action
 	// Ctx ends running actions when the service stops.
 	Ctx context.Context
 }
 
+// oldSessionFile held the logins of the browser settings page this replaced; nothing reads it now.
+const oldSessionFile = "web-sessions.json"
+
 func (s *Server) serviceHandler(mux *http.ServeMux) http.Handler {
-	s.loadSessions(time.Now())
-	mux.HandleFunc("GET /login", s.loginPage)
-	mux.HandleFunc("POST /login", s.login)
-	mux.HandleFunc("POST /logout", s.logout)
-	mux.HandleFunc("POST /settings", s.saveSettings)
-	mux.HandleFunc("POST /action/{name}", s.runAction)
+	if s.Service.SecretDir != "" {
+		_ = os.Remove(filepath.Join(s.Service.SecretDir, oldSessionFile))
+	}
+	mux.HandleFunc("GET /{$}", s.servicePage)
+	mux.HandleFunc("GET /app/new", s.newAppFromLink)
 	api := s.apiHandler()
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasPrefix(r.URL.Path, "/api/") {
 			api.ServeHTTP(w, r)
 			return
 		}
-		if r.Method == http.MethodPost && !sameOrigin(r) {
-			http.Error(w, "cross-site request refused", http.StatusForbidden)
-			return
-		}
-		if r.URL.Path == "/login" || s.validSession(w, r) {
-			w.Header().Set("X-Frame-Options", "DENY")
-			mux.ServeHTTP(w, r)
-			return
-		}
-		http.Redirect(w, r, "/login", http.StatusSeeOther)
+		w.Header().Set("X-Frame-Options", "DENY")
+		mux.ServeHTTP(w, r)
 	})
 }
 
-// sameOrigin refuses form posts from other sites. The session cookie is SameSite=Lax, which already
-// keeps it off cross-site posts; this also covers browsers that ignore SameSite.
-func sameOrigin(r *http.Request) bool {
-	o := r.Header.Get("Origin")
-	if o == "" {
-		o = r.Header.Get("Referer")
-	}
-	if o == "" {
-		return true
-	}
-	u, err := url.Parse(o)
-	return err == nil && u.Host == r.Host
-}
-
-func (s *Server) validSession(w http.ResponseWriter, r *http.Request) bool {
-	c, err := r.Cookie(sessionCookie)
-	if err != nil {
-		return false
-	}
-	key, now := sessionKey(c.Value), time.Now()
+// servicePage tells a browser where the settings went, and shows why adding an org failed, since the
+// GitHub App pages send errors back here.
+func (s *Server) servicePage(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	exp, ok := s.sessions[key]
-	if !ok {
-		return false
-	}
-	if now.After(exp) {
-		delete(s.sessions, key)
-		_ = s.saveSessionsLocked()
-		return false
-	}
-	if exp.Sub(now) < sessionTTL-sessionRenew {
-		s.sessions[key] = now.Add(sessionTTL)
-		_ = s.saveSessionsLocked()
-		setSessionCookie(w, r, c.Value)
-	}
-	return true
-}
-
-func setSessionCookie(w http.ResponseWriter, r *http.Request, id string) {
-	http.SetCookie(w, &http.Cookie{Name: sessionCookie, Value: id, Path: "/", HttpOnly: true, Secure: r.TLS != nil,
-		SameSite: http.SameSiteLaxMode, MaxAge: int(sessionTTL.Seconds())})
-}
-
-func (s *Server) loginPage(w http.ResponseWriter, r *http.Request) {
-	render(w, loginTmpl, map[string]any{"Error": r.URL.Query().Get("e") != "", "Host": s.Cfg.Proxmox.Node})
-}
-
-func (s *Server) login(w http.ResponseWriter, r *http.Request) {
-	user := strings.TrimSpace(r.FormValue("user"))
-	if user != "" && !strings.Contains(user, "@") {
-		user += "@pam"
-	}
-	if err := s.Service.Login(r.Context(), user, r.FormValue("password")); err != nil {
-		time.Sleep(s.Service.FailDelay)
-		http.Redirect(w, r, "/login?e=1", http.StatusSeeOther)
-		return
-	}
-	b := make([]byte, 32)
-	if _, err := rand.Read(b); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	id := hex.EncodeToString(b)
-	s.mu.Lock()
-	s.sessions[sessionKey(id)] = time.Now().Add(sessionTTL)
-	_ = s.saveSessionsLocked()
-	s.mu.Unlock()
-	setSessionCookie(w, r, id)
-	http.Redirect(w, r, "/", http.StatusSeeOther)
-}
-
-func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
-	if c, err := r.Cookie(sessionCookie); err == nil {
-		s.mu.Lock()
-		delete(s.sessions, sessionKey(c.Value))
-		_ = s.saveSessionsLocked()
-		s.mu.Unlock()
-	}
-	http.SetCookie(w, &http.Cookie{Name: sessionCookie, Path: "/", MaxAge: -1})
-	http.Redirect(w, r, "/login", http.StatusSeeOther)
-}
-
-type fieldView struct {
-	Name, Label, Help, Kind, Value string
-	Options                        []string
-}
-
-type poolView struct {
-	Name   string
-	Fields []fieldView
-}
-
-type sectionView struct {
-	ID, Title string
-	Fields    []fieldView
-}
-
-func (s *Server) settings(w http.ResponseWriter, r *http.Request) {
-	report, statusErr := s.status(r.Context())
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	c := s.Cfg
-	var sections []sectionView
-	for _, sec := range hostFields() {
-		v := sectionView{ID: "s-" + slug(sec.Title), Title: sec.Title}
-		for _, f := range sec.Fields {
-			v.Fields = append(v.Fields, fieldView{f.Name, f.Label, f.Help, f.Kind, f.get(c), f.Options})
-		}
-		sections = append(sections, v)
-	}
-	var pools []poolView
-	for _, name := range c.PoolNames() {
-		pv := poolView{Name: name}
-		for _, f := range poolFields() {
-			pv.Fields = append(pv.Fields, fieldView{"pool." + name + "." + f.Key, f.Label, "", f.Kind, f.get(c.Pools[name]), f.Options})
-		}
-		pools = append(pools, pv)
-	}
-	actions, busy := s.actionViews()
-	render(w, settingsTmpl, map[string]any{"Cfg": c, "Sections": sections, "Pools": pools, "Error": s.errMsg,
-		"Report": report, "StatusErr": statusErr, "Actions": actions, "Busy": busy,
-		"NotifySet": c.Notify.WebhookURLFile != "", "LokiSet": c.Logs.TokenFile != ""})
+	msg := s.errMsg
 	s.errMsg = ""
+	s.mu.Unlock()
+	render(w, serviceTmpl, map[string]any{"Host": s.Cfg.HostID, "Error": msg})
 }
 
 // slug turns a section title into an anchor, such as "Logs (Grafana Loki)" into "logs-grafana-loki".
@@ -216,34 +83,6 @@ func slug(title string) string {
 		}
 	}
 	return b.String()
-}
-
-// saveSettings applies the whole form to a copy of the config, validates it, writes it and any new
-// secrets, then restarts the service. Nothing changes on disk unless the result is valid.
-func (s *Server) saveSettings(w http.ResponseWriter, r *http.Request) {
-	if err := r.ParseForm(); err != nil {
-		s.fail(w, r, err.Error())
-		return
-	}
-	s.mu.Lock()
-	next, err := s.apply(r.PostForm)
-	if err == nil {
-		err = next.Save(s.ConfigPath)
-	}
-	if err != nil {
-		s.errMsg = err.Error()
-		s.mu.Unlock()
-		http.Redirect(w, r, "/", http.StatusSeeOther)
-		return
-	}
-	s.Cfg = next
-	s.mu.Unlock()
-	// Saved only schedules the restart, so it runs before the response: the browser (and a test) may
-	// act on the "saved" page as soon as it arrives.
-	if s.Service.Saved != nil {
-		s.Service.Saved()
-	}
-	render(w, savedTmpl, nil)
 }
 
 func (s *Server) apply(form url.Values) (*config.Config, error) {

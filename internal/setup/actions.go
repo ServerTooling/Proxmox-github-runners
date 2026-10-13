@@ -4,21 +4,19 @@ import (
 	"bytes"
 	"context"
 	"io"
-	"net/http"
-	"strings"
 	"sync"
 	"time"
 )
 
-// Action is a CLI command offered as a button on the settings page. It runs in the background, since
-// some (image pulls, template prep) take minutes; the page shows its output as it arrives.
+// Action is a CLI command offered as a button in the app. It runs in the background, since some (image
+// pulls, template prep) take minutes; the app polls for its output as it arrives.
 type Action struct {
 	Name, Label, Help string
-	// Group is the card the button sits in on the page, such as "Images".
+	// Group is the card the button sits in, such as "Images".
 	Group string
-	// Args are form inputs passed to Run by name, such as "pool" for spawn.
+	// Args are inputs passed to Run by name, such as "pool" for spawn.
 	Args []string
-	// Confirm, when set, is asked in the browser before running.
+	// Confirm, when set, is asked in the app before running.
 	Confirm string
 	Run     func(ctx context.Context, w io.Writer, args map[string]string) error
 }
@@ -66,21 +64,6 @@ func (s *Server) action(name string) *Action {
 	return nil
 }
 
-// runAction starts an action from the page's button.
-func (s *Server) runAction(w http.ResponseWriter, r *http.Request) {
-	a := s.action(r.PathValue("name"))
-	if a == nil {
-		http.NotFound(w, r)
-		return
-	}
-	args := map[string]string{}
-	for _, k := range a.Args {
-		args[k] = strings.TrimSpace(r.FormValue(k))
-	}
-	s.startAction(a, args)
-	http.Redirect(w, r, "/#action-"+a.Name, http.StatusSeeOther)
-}
-
 // startAction runs a in the background unless it is already running, and reports whether it started;
 // a second click must not start a second image pull or update.
 func (s *Server) startAction(a *Action, args map[string]string) bool {
@@ -111,44 +94,7 @@ func (s *Server) startAction(a *Action, args map[string]string) bool {
 	return true
 }
 
-type actionView struct {
-	Action
-	Last *runView
-}
-
-type actionGroup struct {
-	Name    string
-	Actions []actionView
-}
-
-// actionViews pairs each action with its latest run, grouped in the order the groups first appear, and
-// reports whether any is still running so the page can refresh itself until it ends.
-func (s *Server) actionViews() ([]actionGroup, bool) {
-	var out []actionGroup
-	at := map[string]int{}
-	busy := false
-	for _, a := range s.Service.Actions {
-		v := actionView{Action: a}
-		if run := s.runs[a.Name]; run != nil {
-			rv := run.view()
-			v.Last = &rv
-			busy = busy || rv.Running
-		}
-		g := a.Group
-		if g == "" {
-			g = "Other"
-		}
-		i, ok := at[g]
-		if !ok {
-			i, at[g] = len(out), len(out)
-			out = append(out, actionGroup{Name: g})
-		}
-		out[i].Actions = append(out[i].Actions, v)
-	}
-	return out, busy
-}
-
-// status runs the status command for the overview, briefly enough not to hold the page up.
+// status runs the status command for the overview, briefly enough not to hold the request up.
 func (s *Server) status(ctx context.Context) (*StatusReport, string) {
 	if s.Service.Status == nil {
 		return nil, ""

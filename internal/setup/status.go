@@ -6,8 +6,8 @@ import (
 	"text/tabwriter"
 )
 
-// StatusReport is what `pve-runners status` reports. The CLI prints it as text; the settings page
-// shows it as cards and a table.
+// StatusReport is what `pve-runners status` reports. The CLI prints it as text; the API sends it to
+// the app as JSON.
 type StatusReport struct {
 	Version string      `json:"version"`
 	Host    string      `json:"host"`

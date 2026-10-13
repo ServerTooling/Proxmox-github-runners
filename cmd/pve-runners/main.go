@@ -53,7 +53,7 @@ Usage:
                                               first-run setup page (GitHub Apps, orgs, template);
                                               --open-firewall allows the port until setup ends
   pve-runners run                             the service: autoscaling, reconcile, image and self-update loops,
-                                              and the settings page (https://<host>:8765, Proxmox login)
+                                              and the API on https://<host>:8765 that the Dell Server Tools app uses
   pve-runners spawn --pool NAME --owner ORG [--repo NAME]
                                               create one ephemeral runner now
   pve-runners reconcile                       destroy finished or expired runners once
@@ -254,25 +254,24 @@ func logShipper(cfg *config.Config, jobs *autoscale.Jobs) (*logship.Shipper, err
 		}}, nil
 }
 
-// startWeb serves the settings page until ctx ends or the returned stop is called. It needs the
-// Proxmox node certificate: to serve HTTPS, and to trust the local Proxmox API that checks logins.
+// startWeb serves the app's API until ctx ends or the returned stop is called. It needs the Proxmox node
+// certificate: to serve HTTPS, and to trust the local Proxmox API that checks the app's credentials.
 func startWeb(ctx context.Context, cfg *config.Config, cfgPath string, imageBusy *atomic.Bool) (stop func()) {
 	if !cfg.Web.On() {
 		return func() {}
 	}
 	cert, err := nodeCert()
 	if err != nil {
-		slog.Error("settings page off", "err", err)
+		slog.Error("app API off", "err", err)
 		return func() {}
 	}
 	s, err := setup.NewServer(cfg, cfgPath)
 	if err != nil {
-		slog.Error("settings page off", "err", err)
+		slog.Error("app API off", "err", err)
 		return func() {}
 	}
 	pveAPI := setup.PinnedClient(cert.Certificate[0])
-	s.Service = &setup.Service{Login: setup.PVELogin("https://127.0.0.1:8006", pveAPI),
-		Check:     setup.PVECheck("https://127.0.0.1:8006", cfg.Proxmox.Node, pveAPI),
+	s.Service = &setup.Service{Check: setup.PVECheck("https://127.0.0.1:8006", cfg.Proxmox.Node, pveAPI),
 		SecretDir: config.DefaultDir, FailDelay: 2 * time.Second, Saved: restartSoon, Ctx: ctx,
 		Status:  func(ctx context.Context) (*setup.StatusReport, error) { return statusReport(ctx, cfgPath) },
 		Actions: webActions(cfgPath, imageBusy)}
@@ -280,13 +279,13 @@ func startWeb(ctx context.Context, cfg *config.Config, cfgPath string, imageBusy
 		TLSConfig: &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12}}
 	go func() {
 		if err := srv.ListenAndServeTLS("", ""); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			slog.Error("settings page", "err", err)
+			slog.Error("app API", "err", err)
 		}
 	}()
 	_, port, _ := net.SplitHostPort(cfg.Web.Listen)
-	slog.Info("settings page", "url", "https://"+net.JoinHostPort(firstOr(preferredIPs(), nodeName()), port))
+	slog.Info("app API", "url", "https://"+net.JoinHostPort(firstOr(preferredIPs(), nodeName()), port))
 	if blocked, _ := host(cfg).HostInputBlocked(ctx); blocked {
-		slog.Warn("the Proxmox firewall drops inbound connections; allow port " + port + " on this host to reach the settings page")
+		slog.Warn("the Proxmox firewall drops inbound connections; allow port " + port + " on this host for the app")
 	}
 	// stop waits for the listener to close, so a reload can bind the same port again right away.
 	done, closed := make(chan struct{}), make(chan struct{})
@@ -301,7 +300,7 @@ func startWeb(ctx context.Context, cfg *config.Config, cfgPath string, imageBusy
 	return func() { close(done); <-closed }
 }
 
-// webActions are the CLI commands offered as buttons on the settings page. Each loads the config from
+// webActions are the CLI commands offered as buttons in the app. Each loads the config from
 // disk like its command does, so it acts on what was last saved. Image work and updates share the run
 // loop's guard: two syncs would download the same image twice, and an update restarts the service.
 func webActions(cfgPath string, imageBusy *atomic.Bool) []setup.Action {
@@ -587,7 +586,7 @@ func cmdSetup(ctx context.Context, cfgPath, listen string, openFirewall bool) er
 	}
 	ln, err := net.Listen("tcp", listen)
 	if errors.Is(err, syscall.EADDRINUSE) && cfg.Web.On() {
-		return fmt.Errorf("%w: the service already serves its settings page there; open https://<this host>%s and log in with your Proxmox account", err, listen)
+		return fmt.Errorf("%w: the service already listens there; add orgs and accounts in the Dell Server Tools app (GitHub runners), or run setup with another --listen", err)
 	}
 	if err != nil {
 		return err

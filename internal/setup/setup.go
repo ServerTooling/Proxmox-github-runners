@@ -86,15 +86,15 @@ type Server struct {
 	// proxmox.storage.
 	Storages []string
 
-	// Service, when set, makes this the always-on settings page instead of one-time setup.
+	// Service, when set, makes this the always-on service API instead of one-time setup.
 	Service *Service
 
-	mu       sync.Mutex
-	apps     map[string]*appState // by owner (lowercase)
-	errMsg   string
-	sessions map[string]time.Time  // settings page logins: SHA-256 of session ID -> expiry
-	runs     map[string]*actionRun // latest run of each settings page action
-	apiOK    map[string]time.Time  // app credentials Proxmox accepted lately: SHA-256 -> until
+	mu     sync.Mutex
+	apps   map[string]*appState // by owner (lowercase)
+	errMsg string
+	runs   map[string]*actionRun // latest run of each action
+	apiOK  map[string]time.Time  // app credentials Proxmox accepted lately: SHA-256 -> until
+	links  map[string]appLink    // one-time links to add an org or account, by key
 }
 
 func NewServer(cfg *config.Config, configPath string) (*Server, error) {
@@ -105,19 +105,18 @@ func NewServer(cfg *config.Config, configPath string) (*Server, error) {
 	return &Server{Cfg: cfg, ConfigPath: configPath, KeyDir: filepath.Dir(config.KeyPath("x")),
 		GitHubWeb: "https://github.com", API: cfg.GitHub.APIURL, HTTP: &http.Client{},
 		Token: hex.EncodeToString(b), Done: make(chan struct{}), apps: map[string]*appState{},
-		sessions: map[string]time.Time{}, runs: map[string]*actionRun{}, apiOK: map[string]time.Time{}}, nil
+		runs: map[string]*actionRun{}, apiOK: map[string]time.Time{}, links: map[string]appLink{}}, nil
 }
 
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("POST /app/new", s.newApp)
 	mux.HandleFunc("GET /app/created", s.appCreated)
 	mux.HandleFunc("GET /app/installed", s.appInstalled)
 	if s.Service != nil {
-		mux.HandleFunc("GET /{$}", s.settings)
 		return s.serviceHandler(mux)
 	}
 	mux.HandleFunc("GET /{$}", s.index)
+	mux.HandleFunc("POST /app/new", s.newApp)
 	mux.HandleFunc("POST /host", s.saveHost)
 	mux.HandleFunc("POST /finish", s.finish)
 	return s.auth(mux)
@@ -193,8 +192,10 @@ func (s *Server) saveHost(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/", http.StatusSeeOther)
 }
 
-// newApp answers with a self-submitting form that posts the manifest to GitHub's "create App" page
-// under the chosen org (or the user's own account when org is left empty).
+const badOwner = "Enter a GitHub org name, or your username for personal repositories."
+
+// newApp starts an App from the setup page's form: the chosen org, or the user's own account when org
+// is left empty.
 func (s *Server) newApp(w http.ResponseWriter, r *http.Request) {
 	owner := strings.TrimSpace(r.FormValue("org"))
 	personal := owner == ""
@@ -202,9 +203,15 @@ func (s *Server) newApp(w http.ResponseWriter, r *http.Request) {
 		owner = strings.TrimSpace(r.FormValue("user"))
 	}
 	if !ownerRe.MatchString(owner) {
-		s.fail(w, r, "Enter a GitHub org name, or your username for personal repositories.")
+		s.fail(w, r, badOwner)
 		return
 	}
+	s.startApp(w, r, owner, personal)
+}
+
+// startApp answers with a self-submitting form that posts the manifest to GitHub's "create App" page
+// under owner.
+func (s *Server) startApp(w http.ResponseWriter, r *http.Request, owner string, personal bool) {
 	hostID := s.Cfg.HostID
 	if hostID == "" {
 		hostID = s.Cfg.Proxmox.Node
@@ -364,7 +371,7 @@ func (s *Server) finish(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// saveNow writes the current config from the settings page (after adding an org) and restarts.
+// saveNow writes the current config after the service added an org or account, and restarts.
 func (s *Server) saveNow(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	err := s.Cfg.Validate()

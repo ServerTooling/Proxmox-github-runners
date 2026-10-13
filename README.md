@@ -102,26 +102,29 @@ Two pool settings cut the wait before a job's first step. Every job still gets a
   and their restore unpacks an archive over files that jobs running beside it have open, which has
   crashed Go builds with `SIGBUS`.
 
-## Settings page
+## Settings in the app
 
-The service serves a settings page at `https://<this host>:8765`, using the same certificate as the
-Proxmox web UI. Log in with a Proxmox account that has `Sys.Modify` (such as `root@pam`). The login stays until you log
-out or don't use the page for 7 days, including across restarts and updates (hashes of the session IDs are
-kept in `/etc/pve-runners/web-sessions.json`, mode 0600). The page covers
-every setting: host limits, network, images, updates, alerts, logs, each pool, and the connected orgs,
-including adding an org. It also takes the notify webhook URL and the Loki token, which are written to
-their own 0600 files and never shown again. Saving validates the whole config, writes it and restarts the
-service. Buttons run what the CLI does (clean up, start a runner, list, pull or prune images, check for
-or install an update, ship logs, show or clear the runner caches, show the config file, prepare a template), with their output on the
-page; the status at the top is `pve-runners status`. Set `web.enabled: false` to turn the page off, or `web.listen` to move it. With the Proxmox
-firewall on and its input policy set to DROP, allow the port on the host.
+After setup, the service's status, settings and actions live in the
+[DellServerTools](https://github.com/ServerTooling/DellServerTools) Android app: open the Proxmox server
+there and tap **GitHub runners (pve-runners)**. The app covers every setting (host limits, network,
+images, updates, alerts, logs, each pool and the connected orgs), takes the notify webhook URL and the
+Loki token (written to their own 0600 files and never shown again), and has buttons for what the CLI does
+(clean up, start a runner, list, pull or prune images, check for or install an update, ship logs, show or
+clear the runner caches, show the config file, prepare a template), with their output. Saving validates
+the whole config, writes it and restarts the service. Adding an org or account starts in the app and
+finishes in the browser, since the GitHub App is created on github.com: the app opens a one-time link to
+`https://<this host>:8765/app/new` (it works once, for 15 minutes). Opening the port in a browser
+otherwise only shows a note pointing to the app.
 
-The same port serves a JSON API under `/api/v1` for the DellServerTools Android app: `GET status`,
-`GET`/`PUT settings` (the page's field names; secrets are write-only) and `GET actions`, `GET`/`POST
-actions/<name>`. It takes no cookies: each request sends the Proxmox credentials the app already uses, as
+The service talks to the app through a JSON API under `/api/v1` on port 8765, served with the Proxmox web
+UI's certificate: `GET status`, `GET`/`PUT settings` (secrets are write-only), `GET actions`,
+`GET`/`POST actions/<name>` and `POST targets` (the one-time link for adding an org or account). It takes
+no cookies: each request sends the Proxmox credentials the app already uses, as
 `Authorization: PVEAPIToken=user@realm!id=secret` or `Authorization: PVEAuthCookie=<ticket>`, and the
 service asks the local Proxmox API whether they have `Sys.Modify` on this node (an answer is reused for a
-minute). Revoking the token in Proxmox revokes the app's access.
+minute). Revoking the token in Proxmox revokes the app's access. Set `web.enabled: false` to turn the API
+off, or `web.listen` to move it. With the Proxmox firewall on and its input policy set to DROP, allow the
+port on the host.
 
 ## Logs
 
