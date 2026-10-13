@@ -437,13 +437,19 @@ func githubFor(cfg *config.Config) func(config.Target) (provision.JITSource, err
 // setting fails here naming the storages that would work instead of deep inside pct. It returns a
 // copy: the image sync and the autoscaler resolve concurrently from the same loaded config.
 func withStorage(ctx context.Context, cfg *config.Config) (*config.Config, error) {
-	s, err := host(cfg).RootfsStorage(ctx, cfg.Proxmox.Storage)
+	c, _, err := withStorageInfo(ctx, cfg)
+	return c, err
+}
+
+// withStorageInfo is withStorage plus whether runners must be full clones on that storage.
+func withStorageInfo(ctx context.Context, cfg *config.Config) (*config.Config, bool, error) {
+	st, err := host(cfg).RootfsStorageInfo(ctx, cfg.Proxmox.Storage)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	c := *cfg
-	c.Proxmox.Storage = s
-	return &c, nil
+	c.Proxmox.Storage = st.Name
+	return &c, !pve.LinkedClones(st.Type), nil
 }
 
 func imageManager(ctx context.Context, cfg *config.Config) (*images.Manager, error) {
@@ -477,11 +483,12 @@ func imageRefs(cfg *config.Config) []images.Ref {
 }
 
 func provisioner(ctx context.Context, cfg *config.Config) (*provision.Provisioner, error) {
-	cfg, err := withStorage(ctx, cfg)
+	cfg, full, err := withStorageInfo(ctx, cfg)
 	if err != nil {
 		return nil, err
 	}
-	p := &provision.Provisioner{Cfg: cfg, Host: host(cfg), GitHub: githubFor(cfg), Now: time.Now, TmpDir: os.TempDir()}
+	p := &provision.Provisioner{Cfg: cfg, Host: host(cfg), GitHub: githubFor(cfg), Now: time.Now, TmpDir: os.TempDir(),
+		NoLinkedClones: full}
 	if len(imageRefs(cfg)) > 0 {
 		m, err := imageManager(ctx, cfg)
 		if err != nil {

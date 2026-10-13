@@ -60,9 +60,16 @@ func (h *Host) RootdirStorages(ctx context.Context) ([]Storage, error) {
 // RootfsStorage returns the storage container disks go on: the configured one after checking it can
 // hold containers, or the best available one when none is configured.
 func (h *Host) RootfsStorage(ctx context.Context, configured string) (string, error) {
+	st, err := h.RootfsStorageInfo(ctx, configured)
+	return st.Name, err
+}
+
+// RootfsStorageInfo is RootfsStorage with the storage's type, which decides whether runners can be
+// linked clones there (see LinkedClones).
+func (h *Host) RootfsStorageInfo(ctx context.Context, configured string) (Storage, error) {
 	list, err := h.RootdirStorages(ctx)
 	if err != nil {
-		return "", fmt.Errorf("list storages: %w", err)
+		return Storage{}, fmt.Errorf("list storages: %w", err)
 	}
 	names := make([]string, len(list))
 	for i, s := range list {
@@ -70,16 +77,16 @@ func (h *Host) RootfsStorage(ctx context.Context, configured string) (string, er
 	}
 	if configured == "" {
 		if len(list) == 0 {
-			return "", fmt.Errorf("no active storage on node %s can hold containers; enable \"Container\" content on one under Datacenter > Storage", h.Node)
+			return Storage{}, fmt.Errorf("no active storage on node %s can hold containers; enable \"Container\" content on one under Datacenter > Storage", h.Node)
 		}
-		return list[0].Name, nil
+		return list[0], nil
 	}
-	if slices.Contains(names, configured) {
-		return configured, nil
+	if i := slices.Index(names, configured); i >= 0 {
+		return list[i], nil
 	}
 	hint := "none of this node's active storages has \"Container\" content; enable it under Datacenter > Storage"
 	if len(names) > 0 {
 		hint = "ones that can: " + strings.Join(names, ", ") + " (or leave it empty to pick one automatically)"
 	}
-	return "", fmt.Errorf("proxmox.storage %q can't hold containers (not active, or no \"Container\" content); %s", configured, hint)
+	return Storage{}, fmt.Errorf("proxmox.storage %q can't hold containers (not active, or no \"Container\" content); %s", configured, hint)
 }
