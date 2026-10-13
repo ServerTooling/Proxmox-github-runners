@@ -117,7 +117,7 @@ func TestEnsureDownloadsVerifiesAndCreatesTemplate(t *testing.T) {
 		"pct create 8900 local:vztmpl/pve-runners-template-ubuntu-latest-20261008-2-amd64.tar.zst --hostname gh-template-ubuntu-latest " +
 			"--pool gh-runners --rootfs local-lvm:16 --unprivileged 1 --features nesting=1,keyctl=1 --cores 2 --memory 2048 " +
 			"--net0 name=eth0,bridge=vmbr0,ip=dhcp,firewall=1 --onboot 0 " +
-			"--tags gh-template;image-ubuntu-latest;rel-ubuntu-latest-20261008-2;created-1790000000 " +
+			"--tags gh-template;image-ubuntu-latest;rel-ubuntu-latest-20261008-2;store-local-lvm;created-1790000000 " +
 			"--description Runner template template-ubuntu-latest-20261008-2 managed by pve-runners",
 		"pct template 8900",
 	}
@@ -208,13 +208,13 @@ func TestPruneKeepsNewestPinnedAndInUse(t *testing.T) {
 		return pve.Guest{VMID: id, Type: "lxc", Template: tpl, RawTags: tags}
 	}
 	f := newFixture(t,
-		g(8900, 1, fmt.Sprintf("gh-template;image-ubuntu-latest;rel-ubuntu-latest-20260101-1;created-%d", now-90*day)), // old: removed
-		g(8901, 1, fmt.Sprintf("gh-template;image-ubuntu-latest;rel-ubuntu-latest-20260201-2;created-%d", now-60*day)), // runners use it
-		g(8902, 1, fmt.Sprintf("gh-template;image-ubuntu-latest;rel-ubuntu-latest-20260301-3;created-%d", now-50*day)), // pinned
-		g(8903, 1, fmt.Sprintf("gh-template;image-ubuntu-latest;rel-ubuntu-latest-20261001-4;created-%d", now-5*day)),  // recent
-		g(8904, 1, fmt.Sprintf("gh-template;image-other;rel-other-20250101-1;created-%d", now-400*day)),                // newest of its name
-		g(8905, 0, fmt.Sprintf("gh-template;image-ubuntu-latest;rel-ubuntu-latest-20261009-5;created-%d", now)),        // never finished
-		g(8000, 1, fmt.Sprintf("gh-template;image-ubuntu-latest;created-%d", now-900*day)),                             // outside range
+		g(8900, 1, fmt.Sprintf("gh-template;store-local-lvm;image-ubuntu-latest;rel-ubuntu-latest-20260101-1;created-%d", now-90*day)), // old: removed
+		g(8901, 1, fmt.Sprintf("gh-template;store-local-lvm;image-ubuntu-latest;rel-ubuntu-latest-20260201-2;created-%d", now-60*day)), // runners use it
+		g(8902, 1, fmt.Sprintf("gh-template;store-local-lvm;image-ubuntu-latest;rel-ubuntu-latest-20260301-3;created-%d", now-50*day)), // pinned
+		g(8903, 1, fmt.Sprintf("gh-template;store-local-lvm;image-ubuntu-latest;rel-ubuntu-latest-20261001-4;created-%d", now-5*day)),  // recent
+		g(8904, 1, fmt.Sprintf("gh-template;store-local-lvm;image-other;rel-other-20250101-1;created-%d", now-400*day)),                // newest of its name
+		g(8905, 0, fmt.Sprintf("gh-template;store-local-lvm;image-ubuntu-latest;rel-ubuntu-latest-20261009-5;created-%d", now)),        // never finished
+		g(8000, 1, fmt.Sprintf("gh-template;store-local-lvm;image-ubuntu-latest;created-%d", now-900*day)),                             // outside range
 	)
 	old := time.Unix(now-90*day, 0)
 	for _, rel := range []string{"20260101-1", "20260301-3", "20261001-4"} {
@@ -241,6 +241,35 @@ func TestPruneKeepsNewestPinnedAndInUse(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(f.m.CacheDir, "pve-runners-template-ubuntu-latest-20261001-4-amd64.tar.zst")); err != nil {
 		t.Fatal("archive of a kept template was deleted")
+	}
+}
+
+func TestStorageChangeMovesTheTemplate(t *testing.T) {
+	tpl := func(id int, tags string) pve.Guest {
+		return pve.Guest{VMID: id, Type: "lxc", Template: 1,
+			RawTags: fmt.Sprintf("gh-template;image-ubuntu-latest;rel-ubuntu-latest-20261008-2;%screated-%d", tags, now-10)}
+	}
+	// 8900 predates the store tag, 8901 is on the old storage; runners cloned from 8901 still run.
+	f := newFixture(t, tpl(8900, ""), tpl(8901, "store-local-zfs;"))
+	f.publish("template-ubuntu-latest-20261008-2", "ubuntu-latest", now-100000, false)
+	id, err := f.m.Ensure(context.Background(), ParseRef("ubuntu-latest"))
+	if err != nil || id != 8902 {
+		t.Fatalf("ensure: %d %v", id, err)
+	}
+	if m := f.pve.Mutations(); len(m) != 2 || !strings.Contains(m[0], "--rootfs local-lvm:16 ") ||
+		!strings.Contains(m[0], ";store-local-lvm;") {
+		t.Fatalf("new template not made on local-lvm: %q", m)
+	}
+	if id, err := f.m.Ensure(context.Background(), ParseRef("ubuntu-latest")); err != nil || id != 8902 {
+		t.Fatalf("second ensure: %d %v", id, err)
+	}
+	removed, err := f.m.Prune(context.Background(), []Ref{ParseRef("ubuntu-latest")}, []int{8901})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(removed) != 1 || removed[0].What != "template 8900 (ubuntu-latest-20261008-2)" ||
+		removed[0].Reason != "not on proxmox.storage local-lvm" {
+		t.Fatalf("removed %+v; the template in use must stay until its runners are gone", removed)
 	}
 }
 

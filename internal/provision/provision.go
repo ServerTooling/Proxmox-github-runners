@@ -76,6 +76,9 @@ type Provisioner struct {
 	Templates func(ctx context.Context, image string) (int, error)
 	Now       func() time.Time
 	TmpDir    string
+	// NoLinkedClones is set when proxmox.storage can't hold linked clones (a directory or thick LVM
+	// storage), so every pool full-clones there.
+	NoLinkedClones bool
 
 	// mu serializes spawns so concurrent callers (one autoscale listener per scale set) can't both
 	// pass the capacity checks for the last free slot or pick the same free guest ID.
@@ -245,7 +248,8 @@ func (p *Provisioner) Spawn(ctx context.Context, req Request) (res *Result, err 
 	if err := p.Host.EnsurePool(ctx, p.Cfg.Proxmox.Pool); err != nil {
 		return nil, err
 	}
-	if err := p.Host.Exec(ctx, pve.LXCClone(template, id, name, p.Cfg.Proxmox.Pool, p.Cfg.Proxmox.Storage, pool.FullClone)); err != nil {
+	if err := p.Host.Exec(ctx, pve.LXCClone(template, id, name, p.Cfg.Proxmox.Pool, p.Cfg.Proxmox.Storage,
+		pool.FullClone || p.NoLinkedClones)); err != nil {
 		return nil, err
 	}
 	defer func() {

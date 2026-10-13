@@ -256,6 +256,21 @@ func created(g pve.Guest) int64 {
 
 // newestTemplate returns the most recently created complete template for an image name (and
 // release, when given).
+// StorageTag records which storage a template's root disk is on. Storage IDs are already tag-safe.
+func StorageTag(storage string) string { return "store-" + storage }
+
+// onStorage keeps the templates whose root disk is on storage. Templates made before the tag
+// existed count as elsewhere, so they are replaced once.
+func onStorage(tpls []pve.Guest, storage string) []pve.Guest {
+	var out []pve.Guest
+	for _, g := range tpls {
+		if g.TagValue("store") == storage {
+			out = append(out, g)
+		}
+	}
+	return out
+}
+
 func newestTemplate(tpls []pve.Guest, name, release string) *pve.Guest {
 	var best *pve.Guest
 	for i := range tpls {
@@ -287,7 +302,9 @@ func (m *Manager) Ensure(ctx context.Context, ref Ref) (int, error) {
 		}
 		return 0, err
 	}
-	if g := newestTemplate(tpls, ref.Name, rel.Tag); g != nil {
+	// Runners are linked clones, which Proxmox keeps on the template's own storage, so after
+	// proxmox.storage changes the image gets a fresh template there (from the cached archive).
+	if g := newestTemplate(onStorage(tpls, m.Storage), ref.Name, rel.Tag); g != nil {
 		return g.VMID, nil
 	}
 	archive, err := m.Fetch(ctx, rel, ref.Name)
@@ -309,7 +326,7 @@ func (m *Manager) create(ctx context.Context, name, release, file string) (id in
 		Storage:  m.Storage,
 		RootfsGB: m.RootfsGB,
 		Bridge:   m.Bridge,
-		Tags: []string{pve.TemplateTag, "image-" + name, "rel-" + relTag(release),
+		Tags: []string{pve.TemplateTag, "image-" + name, "rel-" + relTag(release), StorageTag(m.Storage),
 			"created-" + strconv.FormatInt(m.now().Unix(), 10)},
 		Description: "Runner template " + release + " managed by pve-runners",
 	}
@@ -333,7 +350,8 @@ type Removed struct {
 	Reason string
 }
 
-// Prune deletes templates and cached archives older than the retention period. It never deletes the
+// Prune deletes templates and cached archives older than the retention period, and templates left on
+// a storage runners no longer use. It never deletes the
 // newest template of an image, a template a pinned ref needs, or a template that runners were cloned
 // from (inUse, from the runners' from-<id> tags); Proxmox would refuse that last one anyway.
 func (m *Manager) Prune(ctx context.Context, refs []Ref, inUse []int) ([]Removed, error) {
@@ -352,8 +370,13 @@ func (m *Manager) Prune(ctx context.Context, refs []Ref, inUse []int) ([]Removed
 	for _, g := range tpls {
 		names[g.TagValue("image")] = true
 	}
+	here := onStorage(tpls, m.Storage)
 	for n := range names {
-		if g := newestTemplate(tpls, n, ""); g != nil {
+		g := newestTemplate(here, n, "")
+		if g == nil {
+			g = newestTemplate(tpls, n, "")
+		}
+		if g != nil {
 			keep[g.VMID] = true
 		}
 	}
@@ -373,7 +396,8 @@ func (m *Manager) Prune(ctx context.Context, refs []Ref, inUse []int) ([]Removed
 	sort.Slice(tpls, func(i, j int) bool { return tpls[i].VMID < tpls[j].VMID })
 	for _, g := range tpls {
 		// A template whose creation was interrupted (never converted) is always cleaned up.
-		if keep[g.VMID] || (g.Template == 1 && created(g) > cutoff) {
+		moved := g.TagValue("store") != m.Storage
+		if keep[g.VMID] || (g.Template == 1 && created(g) > cutoff && !moved) {
 			keptRels[g.TagValue("rel")] = true
 			continue
 		}
@@ -383,8 +407,11 @@ func (m *Manager) Prune(ctx context.Context, refs []Ref, inUse []int) ([]Removed
 			continue
 		}
 		reason := "older than images.retention_days"
-		if g.Template != 1 {
+		switch {
+		case g.Template != 1:
 			reason = "incomplete template"
+		case moved:
+			reason = "not on proxmox.storage " + m.Storage
 		}
 		removed = append(removed, Removed{fmt.Sprintf("template %d (%s)", g.VMID, g.TagValue("rel")), reason})
 	}

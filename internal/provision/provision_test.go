@@ -163,6 +163,25 @@ func TestSpawnFailsOnOtherResizeErrors(t *testing.T) {
 	}
 }
 
+func TestSpawnFullClonesWhereLinkedClonesCantGo(t *testing.T) {
+	p, f, gh := setup(t)
+	gh.RunnerGroups["Example-Org"] = gh.RunnerGroups["example-org"]
+	p.Cfg.Proxmox.Storage = "big-dir"
+	p.NoLinkedClones = true
+	if _, err := p.Spawn(context.Background(), Request{Pool: "small", Target: org}); err != nil {
+		t.Fatal(err)
+	}
+	for _, m := range f.Mutations() {
+		if strings.HasPrefix(m, "pct clone ") {
+			if !strings.HasSuffix(m, " --full 1 --storage big-dir") {
+				t.Fatalf("clone: %q", m)
+			}
+			return
+		}
+	}
+	t.Fatalf("no clone: %q", f.Mutations())
+}
+
 func TestSpawnRespectsCapacity(t *testing.T) {
 	p, f, _ := setup(t)
 	f.Guests = append(f.Guests,
