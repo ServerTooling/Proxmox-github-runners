@@ -138,6 +138,31 @@ func TestSpawnCleansUpOnFailure(t *testing.T) {
 	}
 }
 
+func TestSpawnKeepsTemplateDiskWhenAlreadyThatSize(t *testing.T) {
+	for _, msg := range []string{"disk is already at specified size", "unable to shrink disk size"} {
+		p, f, gh := setup(t)
+		gh.RunnerGroups["Example-Org"] = gh.RunnerGroups["example-org"]
+		f.FailOn["pct resize"] = errors.New("pct resize 9000 rootfs 40G: exit status 255: " + msg)
+		if _, err := p.Spawn(context.Background(), Request{Pool: "small", Target: org}); err != nil {
+			t.Fatalf("%s: spawn failed: %v", msg, err)
+		}
+		for _, m := range f.Mutations() {
+			if strings.HasPrefix(m, "pct destroy") {
+				t.Fatalf("%s: runner destroyed: %q", msg, f.Mutations())
+			}
+		}
+	}
+}
+
+func TestSpawnFailsOnOtherResizeErrors(t *testing.T) {
+	p, f, gh := setup(t)
+	gh.RunnerGroups["Example-Org"] = gh.RunnerGroups["example-org"]
+	f.FailOn["pct resize"] = errors.New("pct resize 9000 rootfs 40G: exit status 255: storage full")
+	if _, err := p.Spawn(context.Background(), Request{Pool: "small", Target: org}); err == nil {
+		t.Fatal("expected failure")
+	}
+}
+
 func TestSpawnRespectsCapacity(t *testing.T) {
 	p, f, _ := setup(t)
 	f.Guests = append(f.Guests,
