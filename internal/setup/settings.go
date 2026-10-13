@@ -32,6 +32,8 @@ type LoginFunc func(ctx context.Context, user, password string) error
 // Service turns the server into the always-on settings page.
 type Service struct {
 	Login LoginFunc
+	// Check accepts the app's Proxmox credentials for the JSON API (see api.go).
+	Check CheckFunc
 	// Saved runs after a successful save, to restart the service with the new settings.
 	Saved func()
 	// SecretDir holds the files the page writes secrets to (the notify URL and the Loki token).
@@ -53,7 +55,12 @@ func (s *Server) serviceHandler(mux *http.ServeMux) http.Handler {
 	mux.HandleFunc("POST /logout", s.logout)
 	mux.HandleFunc("POST /settings", s.saveSettings)
 	mux.HandleFunc("POST /action/{name}", s.runAction)
+	api := s.apiHandler()
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/api/") {
+			api.ServeHTTP(w, r)
+			return
+		}
 		if r.Method == http.MethodPost && !sameOrigin(r) {
 			http.Error(w, "cross-site request refused", http.StatusForbidden)
 			return
@@ -251,7 +258,7 @@ func (s *Server) apply(form url.Values) (*config.Config, error) {
 		}
 	}
 	for _, name := range c.PoolNames() {
-		if form.Get("pool."+name+".delete") == "on" {
+		if checked(form.Get("pool." + name + ".delete")) {
 			delete(c.Pools, name)
 			continue
 		}
@@ -269,7 +276,7 @@ func (s *Server) apply(form url.Values) (*config.Config, error) {
 	var targets []config.Target
 	for i, t := range c.Targets {
 		key := fmt.Sprintf("target.%d.", i)
-		if form.Get(key+"remove") == "on" {
+		if checked(form.Get(key + "remove")) {
 			continue
 		}
 		t.Pools = splitList(form.Get(key + "pools"))
@@ -297,7 +304,7 @@ func (s *Server) apply(form url.Values) (*config.Config, error) {
 // secret writes a newly entered secret to its own 0600 file and points the config at it. A blank
 // input keeps the current one; the clear box removes it from the config.
 func (s *Server) secret(form url.Values, name, file string, path *string) error {
-	if form.Get(name+"_clear") == "on" {
+	if checked(form.Get(name + "_clear")) {
 		*path = ""
 		return nil
 	}

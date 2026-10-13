@@ -116,6 +116,13 @@ or install an update, ship logs, show or clear the runner caches, show the confi
 page; the status at the top is `pve-runners status`. Set `web.enabled: false` to turn the page off, or `web.listen` to move it. With the Proxmox
 firewall on and its input policy set to DROP, allow the port on the host.
 
+The same port serves a JSON API under `/api/v1` for the DellServerTools Android app: `GET status`,
+`GET`/`PUT settings` (the page's field names; secrets are write-only) and `GET actions`, `GET`/`POST
+actions/<name>`. It takes no cookies: each request sends the Proxmox credentials the app already uses, as
+`Authorization: PVEAPIToken=user@realm!id=secret` or `Authorization: PVEAuthCookie=<ticket>`, and the
+service asks the local Proxmox API whether they have `Sys.Modify` on this node (an answer is reused for a
+minute). Revoking the token in Proxmox revokes the app's access.
+
 ## Logs
 
 The service logs to the journal (`journalctl -u pve-runners`). To read logs away from the host, set

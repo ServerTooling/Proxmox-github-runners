@@ -270,7 +270,9 @@ func startWeb(ctx context.Context, cfg *config.Config, cfgPath string, imageBusy
 		slog.Error("settings page off", "err", err)
 		return func() {}
 	}
-	s.Service = &setup.Service{Login: setup.PVELogin("https://127.0.0.1:8006", setup.PinnedClient(cert.Certificate[0])),
+	pveAPI := setup.PinnedClient(cert.Certificate[0])
+	s.Service = &setup.Service{Login: setup.PVELogin("https://127.0.0.1:8006", pveAPI),
+		Check:     setup.PVECheck("https://127.0.0.1:8006", cfg.Proxmox.Node, pveAPI),
 		SecretDir: config.DefaultDir, FailDelay: 2 * time.Second, Saved: restartSoon, Ctx: ctx,
 		Status:  func(ctx context.Context) (*setup.StatusReport, error) { return statusReport(ctx, cfgPath) },
 		Actions: webActions(cfgPath, imageBusy)}

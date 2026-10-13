@@ -66,8 +66,7 @@ func (s *Server) action(name string) *Action {
 	return nil
 }
 
-// runAction starts an action unless it is already running; a second click must not start a second
-// image pull or update.
+// runAction starts an action from the page's button.
 func (s *Server) runAction(w http.ResponseWriter, r *http.Request) {
 	a := s.action(r.PathValue("name"))
 	if a == nil {
@@ -78,12 +77,18 @@ func (s *Server) runAction(w http.ResponseWriter, r *http.Request) {
 	for _, k := range a.Args {
 		args[k] = strings.TrimSpace(r.FormValue(k))
 	}
+	s.startAction(a, args)
+	http.Redirect(w, r, "/#action-"+a.Name, http.StatusSeeOther)
+}
+
+// startAction runs a in the background unless it is already running, and reports whether it started;
+// a second click must not start a second image pull or update.
+func (s *Server) startAction(a *Action, args map[string]string) bool {
 	s.mu.Lock()
 	run := s.runs[a.Name]
 	if run != nil && run.view().Running {
 		s.mu.Unlock()
-		http.Redirect(w, r, "/#action-"+a.Name, http.StatusSeeOther)
-		return
+		return false
 	}
 	run = &actionRun{running: true, started: time.Now()}
 	s.runs[a.Name] = run
@@ -103,7 +108,7 @@ func (s *Server) runAction(w http.ResponseWriter, r *http.Request) {
 			run.err = err.Error()
 		}
 	}()
-	http.Redirect(w, r, "/#action-"+a.Name, http.StatusSeeOther)
+	return true
 }
 
 type actionView struct {
