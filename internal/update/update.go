@@ -72,6 +72,7 @@ type Exec func(ctx context.Context, name string, args ...string) error
 type Updater struct {
 	Repo      string // owner/name
 	APIBase   string
+	WebBase   string // https://github.com when empty; used when the API is rate limited
 	HTTP      *http.Client
 	Channel   string
 	Version   string
@@ -115,9 +116,57 @@ func (u *Updater) get(ctx context.Context, url string, limit int64) ([]byte, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("GET %s: HTTP %d", url, resp.StatusCode)
+		return nil, &HTTPError{URL: url, Status: resp.StatusCode}
 	}
 	return io.ReadAll(io.LimitReader(resp.Body, limit))
+}
+
+// HTTPError is a non-200 answer.
+type HTTPError struct {
+	URL    string
+	Status int
+}
+
+func (e *HTTPError) Error() string { return fmt.Sprintf("GET %s: HTTP %d", e.URL, e.Status) }
+
+// RateLimited reports GitHub's API refusing for rate limits. Anonymous calls get 60 an hour, shared
+// with every other device behind the host's public IP, so frequent checks run out.
+func RateLimited(err error) bool {
+	var he *HTTPError
+	return errors.As(err, &he) && (he.Status == http.StatusForbidden || he.Status == http.StatusTooManyRequests)
+}
+
+// latestFromWeb finds the release marked latest through github.com, which isn't counted against the
+// API limit: /releases/latest redirects to the latest tag, and assets live at fixed download URLs.
+// Only tool releases are marked latest (image releases are published with --latest=false). The
+// download is still verified against the signed SHA256SUMS, so these URLs need no trust of their own.
+func (u *Updater) latestFromWeb(ctx context.Context) (*Release, error) {
+	web := strings.TrimRight(u.WebBase, "/")
+	if web == "" {
+		web = "https://github.com"
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, web+"/"+u.Repo+"/releases/latest", nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("User-Agent", "pve-runners")
+	c := *u.HTTP
+	c.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	resp, err := c.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	resp.Body.Close()
+	loc := resp.Header.Get("Location")
+	_, tag, ok := strings.Cut(loc, "/releases/tag/")
+	if resp.StatusCode/100 != 3 || !ok || tag == "" || strings.Contains(tag, "/") {
+		return nil, fmt.Errorf("latest release from %s: HTTP %d, location %q", req.URL, resp.StatusCode, loc)
+	}
+	r := &Release{Tag: tag}
+	for _, n := range []string{BinaryAsset(u.GOARCH), SumsAsset, SigAsset} {
+		r.Assets = append(r.Assets, Asset{Name: n, URL: web + "/" + u.Repo + "/releases/download/" + tag + "/" + n})
+	}
+	return r, nil
 }
 
 func (u *Updater) skipFile() string    { return filepath.Join(u.StateDir, "update-skip") }
@@ -135,6 +184,16 @@ func (u *Updater) Latest(ctx context.Context) (*Release, error) {
 		return nil, nil
 	}
 	body, err := u.get(ctx, strings.TrimRight(u.APIBase, "/")+"/repos/"+u.Repo+"/releases?per_page=30", 4<<20)
+	if RateLimited(err) {
+		r, werr := u.latestFromWeb(ctx)
+		if werr != nil {
+			return nil, fmt.Errorf("%w; fallback: %v", err, werr)
+		}
+		if !OnChannel(r.Tag, u.Channel) || slices.Contains(u.skipped(), r.Tag) || r.Tag == u.Version {
+			return nil, nil
+		}
+		return r, nil
+	}
 	if err != nil {
 		return nil, err
 	}

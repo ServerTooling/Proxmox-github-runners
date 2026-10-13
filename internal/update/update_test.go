@@ -25,6 +25,8 @@ type fixture struct {
 	pubB64  string
 	files   map[string][]byte
 	rels    []Release
+	limited bool   // the API answers 403, as when GitHub's rate limit runs out
+	latest  string // tag github.com/<repo>/releases/latest redirects to
 	cmds    []string
 	updater *Updater
 }
@@ -35,7 +37,18 @@ func newFixture(t *testing.T) *fixture {
 	der, _ := x509.MarshalPKIXPublicKey(pub)
 	f := &fixture{priv: priv, pubB64: base64.StdEncoding.EncodeToString(der), files: map[string][]byte{}}
 	f.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/example/repo/releases/latest" {
+			http.Redirect(w, r, "/example/repo/releases/tag/"+f.latest, http.StatusFound)
+			return
+		}
+		if rest, ok := strings.CutPrefix(r.URL.Path, "/example/repo/releases/download/"); ok {
+			r.URL.Path = "/dl/" + rest
+		}
 		if strings.HasSuffix(r.URL.Path, "/releases") {
+			if f.limited {
+				http.Error(w, "rate limit exceeded", http.StatusForbidden)
+				return
+			}
 			_ = json.NewEncoder(w).Encode(f.rels)
 			return
 		}
@@ -50,7 +63,7 @@ func newFixture(t *testing.T) *fixture {
 	dir := t.TempDir()
 	bin := filepath.Join(dir, "pve-runners")
 	_ = os.WriteFile(bin, []byte("old-binary"), 0o755)
-	f.updater = &Updater{Repo: "example/repo", APIBase: f.srv.URL, HTTP: f.srv.Client(), Channel: "edge",
+	f.updater = &Updater{Repo: "example/repo", APIBase: f.srv.URL, WebBase: f.srv.URL, HTTP: f.srv.Client(), Channel: "edge",
 		Version: "build-1", GOARCH: "amd64", PublicKey: f.pubB64, BinPath: bin, StateDir: filepath.Join(dir, "state"),
 		Now: func() time.Time { return time.Unix(1700000000, 0) },
 		Exec: func(_ context.Context, name string, args ...string) error {
@@ -101,6 +114,34 @@ func TestLatestPicksNewestOnChannel(t *testing.T) {
 	f.updater.Version = "dev"
 	if r, _ := f.updater.Latest(ctx); r != nil {
 		t.Fatal("dev builds must not update")
+	}
+}
+
+func TestLatestFallsBackToTheWebsiteWhenRateLimited(t *testing.T) {
+	f := newFixture(t)
+	f.publish("build-2", 100, "b2", false)
+	f.limited, f.latest = true, "build-2"
+	ctx := context.Background()
+	r, err := f.updater.Latest(ctx)
+	if err != nil || r == nil || r.Tag != "build-2" {
+		t.Fatalf("fallback: %+v %v", r, err)
+	}
+	bin, err := f.updater.Download(ctx, r)
+	if err != nil || string(bin) != "b2" {
+		t.Fatalf("download via website: %q %v", bin, err)
+	}
+	f.updater.Version = "build-2"
+	if r, err := f.updater.Latest(ctx); r != nil || err != nil {
+		t.Fatalf("already current: %+v %v", r, err)
+	}
+	f.updater.Version, f.updater.Channel = "v1.0.0", "stable"
+	if r, err := f.updater.Latest(ctx); r != nil || err != nil {
+		t.Fatalf("a build is not on the stable channel: %+v %v", r, err)
+	}
+	f.latest = "../evil"
+	f.updater.Version, f.updater.Channel = "build-1", "edge"
+	if _, err := f.updater.Latest(ctx); err == nil || !RateLimited(err) {
+		t.Fatalf("bad redirect should fail and keep the 403: %v", err)
 	}
 }
 
