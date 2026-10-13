@@ -94,6 +94,7 @@ type Server struct {
 	errMsg   string
 	sessions map[string]time.Time  // settings page logins: SHA-256 of session ID -> expiry
 	runs     map[string]*actionRun // latest run of each settings page action
+	apiOK    map[string]time.Time  // app credentials Proxmox accepted lately: SHA-256 -> until
 }
 
 func NewServer(cfg *config.Config, configPath string) (*Server, error) {
@@ -104,7 +105,7 @@ func NewServer(cfg *config.Config, configPath string) (*Server, error) {
 	return &Server{Cfg: cfg, ConfigPath: configPath, KeyDir: filepath.Dir(config.KeyPath("x")),
 		GitHubWeb: "https://github.com", API: cfg.GitHub.APIURL, HTTP: &http.Client{},
 		Token: hex.EncodeToString(b), Done: make(chan struct{}), apps: map[string]*appState{},
-		sessions: map[string]time.Time{}, runs: map[string]*actionRun{}}, nil
+		sessions: map[string]time.Time{}, runs: map[string]*actionRun{}, apiOK: map[string]time.Time{}}, nil
 }
 
 func (s *Server) Handler() http.Handler {

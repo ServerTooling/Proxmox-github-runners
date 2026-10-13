@@ -42,14 +42,14 @@ func number(name, label, help string, p func(c *config.Config) *int) field {
 func boolean(name, label, help string, p func(c *config.Config) *bool) field {
 	return field{Name: name, Label: label, Help: help, Kind: "bool",
 		get: func(c *config.Config) string { return strconv.FormatBool(*p(c)) },
-		set: func(c *config.Config, v string) error { *p(c) = v == "on"; return nil }}
+		set: func(c *config.Config, v string) error { *p(c) = checked(v); return nil }}
 }
 
 // optBool is a *bool setting whose nil means true.
 func optBool(name, label, help string, p func(c *config.Config) **bool) field {
 	return field{Name: name, Label: label, Help: help, Kind: "bool",
 		get: func(c *config.Config) string { return strconv.FormatBool(*p(c) == nil || **p(c)) },
-		set: func(c *config.Config, v string) error { b := v == "on"; *p(c) = &b; return nil }}
+		set: func(c *config.Config, v string) error { b := checked(v); *p(c) = &b; return nil }}
 }
 
 func duration(name, label, help string, p func(c *config.Config) *time.Duration) field {
@@ -219,10 +219,10 @@ func poolFields() []poolField {
 			}},
 		{Key: "cache", Label: "Shared cache (tools and packages kept between jobs)", Kind: "bool",
 			get: func(p *config.Pool) string { return strconv.FormatBool(p.Cache) },
-			set: func(p *config.Pool, v string) error { p.Cache = v == "on"; return nil }},
+			set: func(p *config.Pool, v string) error { p.Cache = checked(v); return nil }},
 		{Key: "full_clone", Label: "Full clones", Kind: "bool",
 			get: func(p *config.Pool) string { return strconv.FormatBool(p.FullClone) },
-			set: func(p *config.Pool, v string) error { p.FullClone = v == "on"; return nil }},
+			set: func(p *config.Pool, v string) error { p.FullClone = checked(v); return nil }},
 		{Key: "max_lifetime", Label: "Max lifetime (empty for none)", Kind: "text",
 			get: func(p *config.Pool) string { return fmtDur(p.MaxLifetime) },
 			set: func(p *config.Pool, v string) (err error) {
@@ -234,6 +234,9 @@ func poolFields() []poolField {
 		str("scale_set", "Scale set (empty for the first label)", func(p *config.Pool) *string { return &p.ScaleSet }),
 	}
 }
+
+// checked reads a box: a browser form sends "on" when ticked, the app's JSON sends the "true" it was shown.
+func checked(v string) bool { return v == "on" || v == "true" }
 
 func pinned(c *config.Config, v string) string {
 	if !c.GitHub.Pinned() {

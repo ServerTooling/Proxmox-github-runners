@@ -65,3 +65,43 @@ func PinnedClient(leaf []byte) *http.Client {
 		},
 	}}}
 }
+
+// CheckFunc returns nil when an Authorization header carries Proxmox credentials allowed to change
+// this host. The app sends the same credentials it uses for the Proxmox API: an API token
+// ("PVEAPIToken=user@realm!id=secret") or a login ticket ("PVEAuthCookie=<ticket>").
+type CheckFunc func(ctx context.Context, authorization string) error
+
+// PVECheck asks the Proxmox API (normally the local pveproxy) for the caller's own permissions on the
+// node and requires Sys.Modify, the right PVELogin requires. Proxmox decides what a token or ticket is
+// worth (expiry, revocation, privilege separation), so this service keeps no credentials of its own.
+func PVECheck(base, node string, hc *http.Client) CheckFunc {
+	return func(ctx context.Context, authorization string) error {
+		path := "/nodes/" + node
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet,
+			strings.TrimRight(base, "/")+"/api2/json/access/permissions?path="+url.QueryEscape(path), nil)
+		if err != nil {
+			return err
+		}
+		switch {
+		case strings.HasPrefix(authorization, "PVEAPIToken="):
+			req.Header.Set("Authorization", authorization)
+		case strings.HasPrefix(authorization, "PVEAuthCookie="):
+			req.Header.Set("Cookie", authorization)
+		default:
+			return errLogin
+		}
+		resp, err := hc.Do(req)
+		if err != nil {
+			return fmt.Errorf("proxmox check: %w", err)
+		}
+		defer resp.Body.Close()
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+		var out struct {
+			Data map[string]map[string]int `json:"data"`
+		}
+		if resp.StatusCode != http.StatusOK || json.Unmarshal(body, &out) != nil || out.Data[path]["Sys.Modify"] != 1 {
+			return errLogin
+		}
+		return nil
+	}
+}

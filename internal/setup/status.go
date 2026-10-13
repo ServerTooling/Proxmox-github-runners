@@ -9,19 +9,24 @@ import (
 // StatusReport is what `pve-runners status` reports. The CLI prints it as text; the settings page
 // shows it as cards and a table.
 type StatusReport struct {
-	Version, Host string
-	Max           int
-	Runners       []RunnerRow
+	Version string      `json:"version"`
+	Host    string      `json:"host"`
+	Max     int         `json:"max"`
+	Runners []RunnerRow `json:"runners"`
 	// Pending are runners the next cleanup destroys, with the reason.
-	Pending []string
+	Pending []string `json:"pending"`
 	// Storage is where runner disks go; empty when it could not be found (a warning says why).
-	Storage  string
-	Warnings []string
+	Storage  string   `json:"storage"`
+	Warnings []string `json:"warnings"`
 }
 
 type RunnerRow struct {
-	ID                             int
-	Name, Status, Pool, Owner, Age string
+	ID     int    `json:"id"`
+	Name   string `json:"name"`
+	Status string `json:"status"`
+	Pool   string `json:"pool"`
+	Owner  string `json:"owner"`
+	Age    string `json:"age"`
 }
 
 // Print writes the report as the CLI shows it.
