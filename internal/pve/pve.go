@@ -107,10 +107,17 @@ func LXCSet(id int, s LXCSpec) Cmd {
 	return Cmd{"pct", args}
 }
 
-// LXCResize grows the root disk to an absolute size. Proxmox never shrinks disks, so disk_gb must be
-// at least the template's own root disk size or the spawn fails (and the clone is cleaned up).
+// LXCResize grows the root disk to an absolute size. Proxmox never shrinks disks, so a disk_gb at or
+// below the template's own root disk size keeps the template's size (see ResizeNotNeeded).
 func LXCResize(id, sizeGB int) Cmd {
 	return Cmd{"pct", []string{"resize", strconv.Itoa(id), "rootfs", strconv.Itoa(sizeGB) + "G"}}
+}
+
+// ResizeNotNeeded reports a resize Proxmox refused because the disk is already that size or larger.
+// The template's own disk is then big enough, so the runner can start as it is.
+func ResizeNotNeeded(err error) bool {
+	return err != nil && (strings.Contains(err.Error(), "disk is already at specified size") ||
+		strings.Contains(err.Error(), "unable to shrink disk size"))
 }
 
 // MkdirCmd creates a host folder (and its parents) with the given mode, or sets the mode if it exists.

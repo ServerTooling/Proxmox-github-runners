@@ -281,7 +281,11 @@ func (p *Provisioner) Spawn(ctx context.Context, req Request) (res *Result, err 
 		return nil, err
 	}
 	if pool.DiskGB > 0 {
-		if err = p.Host.Exec(ctx, pve.LXCResize(id, pool.DiskGB)); err != nil {
+		err = p.Host.Exec(ctx, pve.LXCResize(id, pool.DiskGB))
+		if pve.ResizeNotNeeded(err) {
+			err = nil
+		}
+		if err != nil {
 			return nil, err
 		}
 	}
