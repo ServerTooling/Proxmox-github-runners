@@ -35,8 +35,8 @@ func TestCommandBuildersExactArgv(t *testing.T) {
 		{pve.MemInfoCmd(), "cat /proc/meminfo"},
 		{pve.ARCStatsCmd(), "cat /proc/spl/kstat/zfs/arcstats"},
 		{pve.RunnerUnitStateCmd(9001), "pct exec 9001 -- systemctl is-active gh-runner.service"},
-		{pve.RunnerRegisteredCmd(9001), "pct exec 9001 -- sh -c journalctl -u gh-runner.service -o cat --no-pager | " +
-			"grep -q -e 'Listening for Jobs' -e 'Running job' && echo registered || true"},
+		{pve.RunnerPhaseCmd(9001), "pct exec 9001 -- sh -c journalctl -u gh-runner.service -o cat --no-pager | " +
+			"grep -e 'Listening for Jobs' -e 'Running job' -e 'completed with result' | tail -n 1"},
 		{pve.ServiceJournalCmd("", 500), "journalctl -u pve-runners.service -o json --no-pager -n 500"},
 		{pve.RunnerJournalCmd(9001, "s=abc;i=1", 500),
 			"pct exec 9001 -- journalctl -u gh-runner.service -o json --no-pager -n 500 --after-cursor s=abc;i=1"},

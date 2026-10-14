@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"github.com/ServerTooling/proxmox-github-runners/internal/github"
+	"github.com/ServerTooling/proxmox-github-runners/internal/provision"
+	"github.com/ServerTooling/proxmox-github-runners/internal/pve"
 	"github.com/ServerTooling/proxmox-github-runners/internal/scaleset"
 	"github.com/ServerTooling/proxmox-github-runners/internal/scaleset/scalesettest"
 )
@@ -262,5 +264,25 @@ func TestStartedJobLeavesTheQueuedView(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 	if n := len(h.runners(t)); n != 1 {
 		t.Fatalf("%d runners for one job", n)
+	}
+}
+
+// After a restart of the service a runner mid-job is seen as busy from its journal (its JobStarted
+// came before the restart), so it is never offered for removal, and the state says so.
+func TestRestartSeesBusyRunnerFromItsJournal(t *testing.T) {
+	now := time.Now()
+	h := newHarness(t, pve.Guest{VMID: 9003, Name: "gh-pve1-small-9003", Type: "lxc", Status: "running",
+		RawTags: strings.Join(append(provision.Tags("small", "example-org", "ephemeral", 8000, now.Add(-time.Hour)),
+			"scaleset-1", "runnerid-7"), ";")})
+	logs := withLog(h)
+	h.svc.AddRunner("gh-pve1-small-9003", 7)
+	h.pve.RunningJob = map[int]bool{9003: true}
+	h.start(t)
+	eventually(t, "a few polls", func() bool { return len(h.svc.CallsTo("GET", "/queue/*")) > 3 })
+	if len(h.svc.Removed()) != 0 || len(h.runners(t)) != 1 {
+		t.Fatalf("removed %v; the runner is running a job", h.svc.Removed())
+	}
+	if !strings.Contains(logs.String(), "vmid=9003 runner=gh-pve1-small-9003 state=busy") {
+		t.Errorf("not logged busy:\n%s", logs.String())
 	}
 }
