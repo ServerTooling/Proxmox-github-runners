@@ -260,6 +260,7 @@ func (l *Listener) handle(ctx context.Context, sess *scaleset.Session, msg *scal
 		case "JobStarted":
 			l.lastJob = l.now()
 			l.setBusy(j.RunnerName, true)
+			l.dropQueued(j)
 			l.log().Info("job started", "listener", l.Name(), "repo", j.OwnerName+"/"+j.RepositoryName, "runner", j.RunnerName,
 				"job", j.JobDisplayName, "run_id", j.WorkflowRunID)
 		case "JobCompleted":
@@ -550,6 +551,18 @@ func (l *Listener) reconcile(ctx context.Context) int {
 		}
 	}
 	return stale
+}
+
+// dropQueued takes a job that just started off the last REST view, which is up to ReconcileEvery
+// old: until the next read it would count twice, once as queued and once as its busy runner.
+func (l *Listener) dropQueued(j scaleset.Job) {
+	i := slices.IndexFunc(l.queued, func(q github.QueuedJob) bool { return q.RunID == j.WorkflowRunID && q.Name == j.JobDisplayName })
+	if i < 0 {
+		i = slices.IndexFunc(l.queued, func(q github.QueuedJob) bool { return q.RunID == j.WorkflowRunID })
+	}
+	if i >= 0 {
+		l.queued = slices.Delete(l.queued, i, i+1)
+	}
 }
 
 func (l *Listener) warnQueued() {

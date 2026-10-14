@@ -245,3 +245,22 @@ func TestDemand(t *testing.T) {
 		}
 	}
 }
+
+// A job the REST view still lists as queued starts on the runner started for it: until the next
+// REST read it must not count twice (once queued, once as its busy runner) and start a second runner.
+func TestStartedJobLeavesTheQueuedView(t *testing.T) {
+	h := newHarness(t)
+	c := withClock(h)
+	q := withQueue(h)
+	h.l.ReconcileEvery = time.Hour // keep the stale REST view
+	q.set(github.QueuedJob{ID: 1, RunID: 42, Name: "build", Labels: []string{"proxmox"}, CreatedAt: c.now().Add(-time.Hour), Repo: "example-org/app"})
+	h.start(t)
+	eventually(t, "a runner for the stale job", func() bool { return len(h.runners(t)) == 1 })
+	h.svc.Push(1, scalesettest.Job{Type: "JobStarted", RepositoryName: "app", OwnerName: "example-org",
+		RunnerName: "gh-pve1-small-9000", JobDisplayName: "build", WorkflowRunID: 42})
+	eventually(t, "message ack", func() bool { return h.svc.Pending() == 0 })
+	time.Sleep(50 * time.Millisecond)
+	if n := len(h.runners(t)); n != 1 {
+		t.Fatalf("%d runners for one job", n)
+	}
+}
