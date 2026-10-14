@@ -428,12 +428,12 @@ func (l *Listener) survey(ctx context.Context) (fleet, error) {
 	if l.registered == nil {
 		l.registered = map[int]bool{}
 	}
-	seen := map[int]bool{}
+	seen, names := map[int]bool{}, map[string]bool{}
 	for _, g := range runners {
 		if !g.HasTag(tag) || !g.HasTag(owner) {
 			continue
 		}
-		seen[g.VMID] = true
+		seen[g.VMID], names[g.Name] = true, true
 		if g.Status != "running" {
 			l.setState(g.VMID, g.Name, StateDone)
 			continue
@@ -446,12 +446,20 @@ func (l *Listener) survey(ctx context.Context) (fleet, error) {
 			continue
 		}
 		if !l.registered[g.VMID] {
-			ok, err := l.Host.RunnerRegistered(ctx, g.VMID)
+			phase, err := l.Host.RunnerPhase(ctx, g.VMID)
 			if err != nil {
 				// Can't tell (the guest is still booting, or stopping): it counts as not registered yet.
 				l.log().Warn("check runner registration", "listener", l.Name(), "vmid", g.VMID, "err", err)
 			}
-			l.registered[g.VMID] = ok
+			l.registered[g.VMID] = phase != pve.PhaseStarting
+			if phase == pve.PhaseBusy {
+				// Mid-job across a restart of this service: the JobStarted message came before it.
+				l.setBusy(g.Name, true)
+				l.setState(g.VMID, g.Name, StateBusy)
+				f.live++
+				f.busy++
+				continue
+			}
 		}
 		if l.registered[g.VMID] {
 			l.setState(g.VMID, g.Name, StateRegistered)
@@ -478,6 +486,11 @@ func (l *Listener) survey(ctx context.Context) (fleet, error) {
 			l.setState(g.VMID, g.Name, StateBusy)
 			f.live++
 			f.busy++
+		}
+	}
+	for name := range l.busy {
+		if !names[name] {
+			delete(l.busy, name)
 		}
 	}
 	for id := range l.state {

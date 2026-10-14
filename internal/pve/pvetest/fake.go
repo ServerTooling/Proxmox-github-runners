@@ -36,9 +36,11 @@ type Fake struct {
 	// UnitState maps a guest ID to what `systemctl is-active gh-runner.service` prints in it
 	// (default "active").
 	UnitState map[int]string
-	// NotRegistered lists guests whose runner never connects to GitHub (RunnerRegisteredCmd prints
+	// NotRegistered lists guests whose runner never connects to GitHub (RunnerPhaseCmd prints
 	// nothing for them; every other guest reports "registered").
 	NotRegistered map[int]bool
+	// RunningJob lists guests whose runner's journal shows it running a job.
+	RunningJob map[int]bool
 	// Outputs maps a full command line to what it prints, for read-only commands like journalctl.
 	Outputs map[string]string
 	// Delay makes every command take this long, so concurrent callers interleave like on a real host.
@@ -77,12 +79,15 @@ func (f *Fake) Run(_ context.Context, name string, args ...string) ([]byte, erro
 			return []byte(state + "\n"), nil
 		}
 		return []byte(state + "\n"), fmt.Errorf("exit status 3")
-	case name == "pct" && args[0] == "exec" && strings.Contains(line, "grep -q -e 'Listening for Jobs'"):
+	case name == "pct" && args[0] == "exec" && strings.Contains(line, "grep -e 'Listening for Jobs'"):
 		id, _ := strconv.Atoi(args[1])
-		if f.NotRegistered[id] {
+		switch {
+		case f.NotRegistered[id]:
 			return nil, nil
+		case f.RunningJob[id]:
+			return []byte("2026-01-02 03:04:05Z: Running job: build\n"), nil
 		}
-		return []byte("registered\n"), nil
+		return []byte("2026-01-02 03:04:05Z: Listening for Jobs\n"), nil
 	case name == "pvesh" && args[0] == "get" && args[1] == "/cluster/firewall/options":
 		on := 0
 		if f.FirewallOn {

@@ -251,6 +251,13 @@ func (p *Provisioner) Spawn(ctx context.Context, req Request) (res *Result, err 
 	if err := p.Host.EnsurePool(ctx, p.Cfg.Proxmox.Pool); err != nil {
 		return nil, err
 	}
+	step := func(s string) {
+		if req.Step != nil {
+			req.Step(id, s)
+		}
+	}
+	// Logged before the clone, which can take a minute or more on storage without linked clones.
+	step("provisioning")
 	if err := p.Host.Exec(ctx, pve.LXCClone(template, id, name, p.Cfg.Proxmox.Pool, p.Cfg.Proxmox.Storage,
 		pool.FullClone || p.NoLinkedClones)); err != nil {
 		return nil, err
@@ -265,12 +272,6 @@ func (p *Provisioner) Spawn(ctx context.Context, req Request) (res *Result, err 
 			}
 		}
 	}()
-	step := func(s string) {
-		if req.Step != nil {
-			req.Step(id, s)
-		}
-	}
-	step("provisioning")
 	tags := append(Tags(req.Pool, t.Owner(), pool.Mode, template, p.now()), req.Tags...)
 	if jit.Runner.ID != 0 {
 		tags = append(tags, RunnerIDTag(jit.Runner.ID))

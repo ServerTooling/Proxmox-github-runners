@@ -405,22 +405,36 @@ func (h *Host) RunnerUnitState(ctx context.Context, id int) (string, error) {
 	return "", err
 }
 
-// RunnerRegisteredCmd prints "registered" once the runner in a guest has connected to GitHub and is
-// listening for (or running) a job. It reads the unit's journal, so it needs no GitHub permission.
-func RunnerRegisteredCmd(id int) Cmd {
-	return LXCExec(id, "sh", "-c", registeredScript)
+// RunnerPhaseCmd prints the runner's last journal line that says where it is: listening for jobs,
+// running one, or done with one. It reads the unit's journal, so it needs no GitHub permission.
+func RunnerPhaseCmd(id int) Cmd {
+	return LXCExec(id, "sh", "-c", phaseScript)
 }
 
-const registeredScript = `journalctl -u gh-runner.service -o cat --no-pager | ` +
-	`grep -q -e 'Listening for Jobs' -e 'Running job' && echo registered || true`
+const phaseScript = `journalctl -u gh-runner.service -o cat --no-pager | ` +
+	`grep -e 'Listening for Jobs' -e 'Running job' -e 'completed with result' | tail -n 1`
 
-// RunnerRegistered reports whether the guest's runner has registered with GitHub (RunnerRegisteredCmd).
-func (h *Host) RunnerRegistered(ctx context.Context, id int) (bool, error) {
-	out, err := h.run(ctx, RunnerRegisteredCmd(id))
+// Runner phases RunnerPhase reports.
+const (
+	PhaseStarting   = ""           // not connected to GitHub yet
+	PhaseRegistered = "registered" // listening for a job, or finished with one
+	PhaseBusy       = "busy"       // running a job
+)
+
+// RunnerPhase reports how far the guest's runner has got (RunnerPhaseCmd).
+func (h *Host) RunnerPhase(ctx context.Context, id int) (string, error) {
+	out, err := h.run(ctx, RunnerPhaseCmd(id))
 	if err != nil {
-		return false, err
+		return PhaseStarting, err
 	}
-	return strings.TrimSpace(string(out)) == "registered", nil
+	switch line := strings.TrimSpace(string(out)); {
+	case line == "":
+		return PhaseStarting, nil
+	case strings.Contains(line, "Running job"):
+		return PhaseBusy, nil
+	default:
+		return PhaseRegistered, nil
+	}
 }
 
 // MemInfoCmd and ARCStatsCmd read the host's memory counters; the service runs on the node itself.
