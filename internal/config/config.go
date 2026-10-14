@@ -153,6 +153,9 @@ type Cache struct {
 // Autoscale controls the job-queue listener. With it off, runners start only with "pve-runners spawn".
 type Autoscale struct {
 	Enabled bool `yaml:"enabled"`
+	// StartGrace is how long a new runner may take to connect to GitHub. Until then it is never
+	// removed as idle; one that hasn't connected by then is destroyed and replaced.
+	StartGrace time.Duration `yaml:"start_grace,omitempty"`
 }
 
 // Network isolates runner guests: internet access yes, LAN no. Enforced with a Proxmox cluster
@@ -251,7 +254,7 @@ func Default() *Config {
 			// the router on the LAN. Only those ports are let through.
 			Allow: []pve.AllowRule{{Proto: "udp", Port: 53}, {Proto: "tcp", Port: 53}, {Proto: "udp", Port: 67}},
 		},
-		Autoscale: Autoscale{Enabled: true},
+		Autoscale: Autoscale{Enabled: true, StartGrace: 3 * time.Minute},
 		Cache:     Cache{Dir: "/var/lib/pve-runners/cache", MaxGB: 50},
 		Logs:      Logs{Interval: 15 * time.Second},
 		Web:       Web{Listen: ":8765"},
@@ -348,6 +351,9 @@ func (c *Config) applyDefaults() {
 	}
 	if c.Web.Listen == "" {
 		c.Web.Listen = d.Web.Listen
+	}
+	if c.Autoscale.StartGrace == 0 {
+		c.Autoscale.StartGrace = d.Autoscale.StartGrace
 	}
 	if c.Logs.Interval == 0 {
 		c.Logs.Interval = d.Logs.Interval
@@ -534,6 +540,9 @@ func (c *Config) Validate() error {
 	}
 	if _, port, err := net.SplitHostPort(c.Web.Listen); err != nil || port == "" {
 		add("web.listen %q must be [address]:port, such as :8765", c.Web.Listen)
+	}
+	if c.Autoscale.StartGrace < 30*time.Second {
+		add("autoscale.start_grace must be at least 30s, got %s", c.Autoscale.StartGrace)
 	}
 	if c.Logs.Interval < 5*time.Second {
 		add("logs.interval must be at least 5s, got %s", c.Logs.Interval)

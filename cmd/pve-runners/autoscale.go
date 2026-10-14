@@ -47,7 +47,8 @@ func listeners(cfg *config.Config, prov *provision.Provisioner, n *notify.Notifi
 					Private: func(ctx context.Context, owner, r string) (bool, error) {
 						return gh.RepoPrivate(ctx, t.InstallationID, owner, r)
 					},
-					Failed: func(ctx context.Context, msg string) { n.Send(ctx, notify.SpawnFailed, msg) }}
+					Failed:     func(ctx context.Context, msg string) { n.Send(ctx, notify.SpawnFailed, msg) },
+					StartGrace: cfg.Autoscale.StartGrace, Queued: queuedJobs(gh, t, repo)}
 				l.Group = func(ctx context.Context) (int64, error) {
 					if repo != "" {
 						private, err := gh.RepoPrivate(ctx, t.InstallationID, t.User, repo)
@@ -112,4 +113,34 @@ func (a *autoscaler) stop() {
 	}
 	a.cancel()
 	a.wg.Wait()
+}
+
+// queuedJobs lists the queued jobs of the repositories a listener serves: its repo (personal
+// accounts), the target's repos list, or every private repository the App can see.
+func queuedJobs(gh *github.Client, t config.Target, repo string) func(ctx context.Context) ([]github.QueuedJob, error) {
+	return func(ctx context.Context) ([]github.QueuedJob, error) {
+		repos := t.Repos
+		if repo != "" {
+			repos = []string{repo}
+		} else if len(repos) == 0 {
+			all, err := gh.InstallationRepos(ctx, t.InstallationID)
+			if err != nil {
+				return nil, err
+			}
+			for _, r := range all {
+				if r.Private {
+					repos = append(repos, r.Name)
+				}
+			}
+		}
+		var out []github.QueuedJob
+		for _, r := range repos {
+			jobs, err := gh.QueuedJobs(ctx, t.InstallationID, t.Owner(), r)
+			if err != nil {
+				return nil, fmt.Errorf("%s/%s: %w", t.Owner(), r, err)
+			}
+			out = append(out, jobs...)
+		}
+		return out, nil
+	}
 }

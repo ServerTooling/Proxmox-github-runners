@@ -21,6 +21,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -293,6 +294,51 @@ func (c *Client) RepoPrivate(ctx context.Context, inst int64, owner, repo string
 		return false, err
 	}
 	return out.Private || out.Visibility == "internal", nil
+}
+
+// QueuedJob is a workflow job GitHub has queued and no runner has picked up yet.
+type QueuedJob struct {
+	ID        int64     `json:"id"`
+	RunID     int64     `json:"run_id"`
+	Name      string    `json:"name"`
+	Status    string    `json:"status"`
+	Labels    []string  `json:"labels"`
+	CreatedAt time.Time `json:"created_at"`
+	Repo      string    `json:"-"` // owner/name
+}
+
+// QueuedJobs lists a repository's queued jobs. Runs that are queued or already in progress can hold
+// them (one job of a run starts while another still waits), so both are read; the App's
+// actions: read permission covers both calls.
+func (c *Client) QueuedJobs(ctx context.Context, inst int64, owner, repo string) ([]QueuedJob, error) {
+	base := "/repos/" + url.PathEscape(owner) + "/" + url.PathEscape(repo) + "/actions/runs"
+	var out []QueuedJob
+	for _, status := range []string{"queued", "in_progress"} {
+		var runs struct {
+			WorkflowRuns []struct {
+				ID int64 `json:"id"`
+			} `json:"workflow_runs"`
+		}
+		if err := c.asInstallation(ctx, inst, http.MethodGet, base+"?status="+status+"&per_page=100", nil, &runs); err != nil {
+			return nil, err
+		}
+		for _, r := range runs.WorkflowRuns {
+			var jobs struct {
+				Jobs []QueuedJob `json:"jobs"`
+			}
+			path := base + "/" + strconv.FormatInt(r.ID, 10) + "/jobs?per_page=100"
+			if err := c.asInstallation(ctx, inst, http.MethodGet, path, nil, &jobs); err != nil {
+				return nil, err
+			}
+			for _, j := range jobs.Jobs {
+				if j.Status == "queued" {
+					j.Repo = owner + "/" + repo
+					out = append(out, j)
+				}
+			}
+		}
+	}
+	return out, nil
 }
 
 // RepoJITConfig is the repo-level variant, used for personal accounts (which have no org runners).

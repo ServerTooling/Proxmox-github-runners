@@ -40,6 +40,7 @@ type Job struct {
 	JobDisplayName  string `json:"jobDisplayName,omitempty"`
 	JobWorkflowRef  string `json:"jobWorkflowRef,omitempty"`
 	WorkflowRunID   int64  `json:"workflowRunId,omitempty"`
+	Result          string `json:"result,omitempty"`
 }
 
 type ScaleSet struct {

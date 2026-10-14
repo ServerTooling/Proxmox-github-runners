@@ -236,7 +236,7 @@ func TestDesired(t *testing.T) {
 	for _, c := range []struct{ assigned, min, max, want int }{
 		{0, 0, 4, 0}, {3, 0, 4, 3}, {9, 0, 4, 4}, {1, 1, 4, 2}, {0, 2, 4, 2},
 	} {
-		if got := Desired(scaleset.Statistics{TotalAssignedJobs: c.assigned}, c.min, c.max); got != c.want {
+		if got := Desired(Demand(scaleset.Statistics{TotalAssignedJobs: c.assigned}, 0, 0), c.min, c.max); got != c.want {
 			t.Errorf("Desired(%d, min %d, max %d) = %d, want %d", c.assigned, c.min, c.max, got, c.want)
 		}
 	}

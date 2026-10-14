@@ -53,6 +53,7 @@ pools:
 
 autoscale:
   enabled: true                    # start a runner for each queued job; off = only `pve-runners spawn`
+  start_grace: 3m                  # a new runner not connected to GitHub by then is replaced
 
 cache:
   dir: /var/lib/pve-runners/cache  # pools with cache: true; one subfolder per org, mounted at /opt/pve-cache

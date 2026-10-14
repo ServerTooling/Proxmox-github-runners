@@ -7,6 +7,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ServerTooling/proxmox-github-runners/internal/github"
 	"github.com/ServerTooling/proxmox-github-runners/internal/github/githubtest"
@@ -149,5 +150,36 @@ func TestRegistrationTokenPaths(t *testing.T) {
 	want := []string{"/orgs/example-org/actions/runners/registration-token", "/repos/someone/side/actions/runners/registration-token"}
 	if !reflect.DeepEqual(f.RegTokens, want) {
 		t.Fatalf("paths %v", f.RegTokens)
+	}
+}
+
+func TestQueuedJobsReadsQueuedAndInProgressRuns(t *testing.T) {
+	f := githubtest.New(42)
+	defer f.Close()
+	f.Runs = map[string][]map[string]any{"example-org/app": {
+		{"id": 10, "status": "queued"}, {"id": 11, "status": "in_progress"}, {"id": 12, "status": "completed"}}}
+	f.RunJobs = map[int64][]map[string]any{
+		10: {{"id": 100, "run_id": 10, "name": "build", "status": "queued", "labels": []string{"proxmox"},
+			"created_at": "2026-01-02T03:04:05Z"}},
+		11: {{"id": 110, "run_id": 11, "name": "lint", "status": "in_progress", "labels": []string{"proxmox"}},
+			{"id": 111, "run_id": 11, "name": "e2e", "status": "queued", "labels": []string{"proxmox"}}},
+	}
+	c := github.NewClient(f.URL, 42, f.Key)
+	jobs, err := c.QueuedJobs(context.Background(), 5, "example-org", "app")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(jobs) != 2 || jobs[0].ID != 100 || jobs[1].ID != 111 || jobs[0].Repo != "example-org/app" ||
+		jobs[0].CreatedAt.Format(time.RFC3339) != "2026-01-02T03:04:05Z" || jobs[1].Labels[0] != "proxmox" {
+		t.Fatalf("jobs = %+v", jobs)
+	}
+	want := []string{
+		"/repos/example-org/app/actions/runs?status=queued&per_page=100",
+		"/repos/example-org/app/actions/runs/10/jobs?per_page=100",
+		"/repos/example-org/app/actions/runs?status=in_progress&per_page=100",
+		"/repos/example-org/app/actions/runs/11/jobs?per_page=100",
+	}
+	if !reflect.DeepEqual(f.RunQueries, want) {
+		t.Fatalf("requests\n got %q\nwant %q", f.RunQueries, want)
 	}
 }

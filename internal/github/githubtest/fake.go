@@ -34,8 +34,13 @@ type Fake struct {
 	ManifestCodes map[string]bool
 	// RepoVisibility maps "owner/repo" to public | private | internal.
 	RepoVisibility map[string]string
-	tokens         map[string]int64
-	nextRunner     int64
+	// Runs maps "owner/repo" to its workflow runs (id, status); RunJobs maps a run ID to its jobs.
+	Runs    map[string][]map[string]any
+	RunJobs map[int64][]map[string]any
+	// RunQueries records each request for runs or jobs, path and query.
+	RunQueries []string
+	tokens     map[string]int64
+	nextRunner int64
 }
 
 type Recorded struct {
@@ -145,6 +150,24 @@ func (f *Fake) serve(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case r.Method == "GET" && path == "/installation/repositories":
 		write(w, 200, map[string]any{"repositories": f.Repos[inst]})
+	case r.Method == "GET" && strings.HasPrefix(path, "/repos/") && strings.Contains(path, "/actions/runs"):
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		f.RunQueries = append(f.RunQueries, path+"?"+r.URL.RawQuery)
+		parts := strings.Split(path, "/") // "", repos, owner, repo, actions, runs[, id, jobs]
+		if len(parts) == 6 {
+			var runs []map[string]any
+			for _, run := range f.Runs[parts[2]+"/"+parts[3]] {
+				if run["status"] == r.URL.Query().Get("status") {
+					runs = append(runs, run)
+				}
+			}
+			write(w, 200, map[string]any{"total_count": len(runs), "workflow_runs": runs})
+			return
+		}
+		var id int64
+		fmt.Sscan(parts[6], &id)
+		write(w, 200, map[string]any{"jobs": f.RunJobs[id]})
 	case r.Method == "GET" && strings.HasPrefix(path, "/repos/") && strings.Count(path, "/") == 3:
 		name := strings.TrimPrefix(path, "/repos/")
 		vis, ok := f.RepoVisibility[name]
