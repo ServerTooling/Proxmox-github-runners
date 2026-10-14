@@ -45,6 +45,9 @@ type Fake struct {
 	Outputs map[string]string
 	// Delay makes every command take this long, so concurrent callers interleave like on a real host.
 	Delay time.Duration
+	// Before, when set, is called with each command line before it runs (outside the fake's lock), so
+	// a test can hold one command until another has run.
+	Before func(line string)
 }
 
 func New(guests ...pve.Guest) *Fake {
@@ -56,6 +59,9 @@ func New(guests ...pve.Guest) *Fake {
 
 func (f *Fake) Run(_ context.Context, name string, args ...string) ([]byte, error) {
 	time.Sleep(f.Delay)
+	if f.Before != nil {
+		f.Before(name + " " + strings.Join(args, " "))
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	line := name + " " + strings.Join(args, " ")

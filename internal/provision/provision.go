@@ -80,8 +80,10 @@ type Provisioner struct {
 	// storage), so every pool full-clones there.
 	NoLinkedClones bool
 
-	// mu serializes spawns so concurrent callers (one autoscale listener per scale set) can't both
-	// pass the capacity checks for the last free slot or pick the same free guest ID.
+	// mu serializes spawns until the new guest is cloned and tagged, so concurrent callers can't both
+	// pass the capacity checks for the last free slot or pick the same free guest ID. Proxmox locks the
+	// template for the whole clone anyway, so clones of one template can't overlap; the rest of a spawn
+	// (start, boot, runner service) runs outside it, alongside the next spawn's clone.
 	mu sync.Mutex
 }
 
@@ -166,7 +168,12 @@ func (p *Provisioner) Spawn(ctx context.Context, req Request) (res *Result, err 
 	inFlight.Add(1)
 	defer inFlight.Add(-1)
 	p.mu.Lock()
-	defer p.mu.Unlock()
+	locked := true
+	defer func() {
+		if locked {
+			p.mu.Unlock()
+		}
+	}()
 	// Checked after inFlight is raised and after waiting our turn, so Drain either sees this spawn or
 	// this spawn sees Drain, including spawns that queued behind one already running.
 	if draining.Load() {
@@ -294,6 +301,9 @@ func (p *Provisioner) Spawn(ctx context.Context, req Request) (res *Result, err 
 	if err = p.Host.Exec(ctx, pve.LXCSet(id, spec)); err != nil {
 		return nil, err
 	}
+	// Tagged now, so the next spawn counts this guest and can't pick its ID.
+	p.mu.Unlock()
+	locked = false
 	if pool.DiskGB > 0 {
 		err = p.Host.Exec(ctx, pve.LXCResize(id, pool.DiskGB))
 		if pve.ResizeNotNeeded(err) {

@@ -286,3 +286,31 @@ func TestRestartSeesBusyRunnerFromItsJournal(t *testing.T) {
 		t.Errorf("not logged busy:\n%s", logs.String())
 	}
 }
+
+// Two jobs at once start their runners together: the second runner's clone doesn't wait for the
+// first runner to boot (on 2026-10-14 the second job waited a whole extra spawn).
+func TestTwoJobsSpawnTogether(t *testing.T) {
+	h := newHarness(t)
+	cloned := make(chan struct{})
+	var once sync.Once
+	h.pve.Before = func(line string) {
+		switch {
+		case strings.HasPrefix(line, "pct clone 8000 9001 "):
+			once.Do(func() { close(cloned) })
+		case line == "pct start 9000":
+			select {
+			case <-cloned:
+			case <-time.After(5 * time.Second):
+				t.Error("the second runner's spawn waited for the first runner to start")
+			}
+		}
+	}
+	h.start(t)
+	h.svc.Push(2,
+		scalesettest.Job{Type: "JobAssigned", RunnerRequestID: 1, RepositoryName: "app", OwnerName: "example-org"},
+		scalesettest.Job{Type: "JobAssigned", RunnerRequestID: 2, RepositoryName: "app", OwnerName: "example-org"})
+	eventually(t, "two runners", func() bool { return len(h.runners(t)) == 2 })
+	if n := len(h.svc.JITNames()); n != 2 {
+		t.Errorf("%d runners registered for two jobs", n)
+	}
+}
