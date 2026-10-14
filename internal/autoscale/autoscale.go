@@ -83,7 +83,9 @@ type Listener struct {
 	privMu  sync.Mutex
 	private map[string]privEntry
 
-	// Runner states, all touched only by the listener's own goroutine.
+	// Runner states, touched only by the listener's own goroutine, except state, which concurrent
+	// spawns also write through step (under stepMu) while that goroutine waits for them.
+	stepMu     sync.Mutex
 	state      map[int]string  // vmid -> last logged state
 	registered map[int]bool    // vmid -> its runner has connected to GitHub (never goes back)
 	busy       map[string]bool // runner name -> has a job (JobStarted until JobCompleted)
@@ -407,6 +409,8 @@ func (l *Listener) setState(vmid int, runner, state string, attrs ...any) {
 
 // step logs a start step of a runner still provisioning (provision.Request.Step).
 func (l *Listener) step(vmid int, step string) {
+	l.stepMu.Lock()
+	defer l.stepMu.Unlock()
 	if l.state == nil {
 		l.state = map[int]string{}
 	}
@@ -415,7 +419,7 @@ func (l *Listener) step(vmid int, step string) {
 }
 
 // survey reads this scale set's runners and puts each in its state. A stopped one has finished
-// (spawns run in this goroutine, so none of ours is mid-start while this runs) and waits for
+// (scale waits for its spawns, so none of ours is mid-start while this runs) and waits for
 // reconcile to destroy it. A running one that hasn't registered within the start grace is destroyed
 // here, so the caller's count goes down and it starts a replacement while the jobs are still there.
 func (l *Listener) survey(ctx context.Context) (fleet, error) {
@@ -616,31 +620,49 @@ func (l *Listener) scale(ctx context.Context, stats scaleset.Statistics) {
 		l.trim(ctx, f.spare, have-want)
 		return
 	}
-	for ; have < want; have++ {
-		res, err := l.Prov.Spawn(ctx, provision.Request{Pool: l.PoolName, Target: l.Target, Repo: l.Repo,
-			JIT: l.jit, Tags: []string{ScaleSetTag(l.scaleSetID)},
-			Step: l.step})
-		if errors.Is(err, provision.ErrAtCapacity) {
+	if have >= want {
+		return
+	}
+	// All at once: the provisioner takes them one clone at a time, and each one's start and boot
+	// overlap the next one's clone. This goroutine waits for all of them, so survey never sees one
+	// of ours mid-start.
+	type spawned struct {
+		res *provision.Result
+		err error
+	}
+	out := make([]spawned, want-have)
+	var wg sync.WaitGroup
+	for i := range out {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			out[i].res, out[i].err = l.Prov.Spawn(ctx, provision.Request{Pool: l.PoolName, Target: l.Target, Repo: l.Repo,
+				JIT: l.jit, Tags: []string{ScaleSetTag(l.scaleSetID)},
+				Step: l.step})
+		}()
+	}
+	wg.Wait()
+	for _, o := range out {
+		switch err := o.err; {
+		case errors.Is(err, provision.ErrAtCapacity):
 			// The host or pool is full; GitHub keeps the job queued until a runner frees up.
 			l.log().Info("at capacity", "listener", l.Name(), "want", want, "have", have, "reason", err)
-			return
-		}
-		if errors.Is(err, provision.ErrDraining) {
-			return // the service restarts for an update and spawns again after
-		}
-		if err != nil {
+		case errors.Is(err, provision.ErrDraining):
+			// the service restarts for an update and spawns again after
+		case err != nil:
 			if ctx.Err() != nil {
-				return
+				continue
 			}
 			l.log().Error("spawn failed", "listener", l.Name(), "err", err)
 			if msg := err.Error(); msg != l.lastFail && l.Failed != nil {
 				l.Failed(ctx, l.Name()+": "+msg)
 			}
 			l.lastFail = err.Error()
-			return
+		default:
+			l.lastFail = ""
+			have++
+			l.log().Info("runner started", "listener", l.Name(), "vmid", o.res.VMID, "runner", o.res.RunnerName)
 		}
-		l.lastFail = ""
-		l.log().Info("runner started", "listener", l.Name(), "vmid", res.VMID, "runner", res.RunnerName)
 	}
 }
 

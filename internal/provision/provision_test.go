@@ -5,7 +5,9 @@ import (
 	"errors"
 	"os"
 	"reflect"
+	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -315,6 +317,49 @@ func TestConcurrentSpawnsRespectCapacity(t *testing.T) {
 	}
 	if ok != 2 || full != 2 {
 		t.Fatalf("%d started, %d refused; pool max is 2", ok, full)
+	}
+}
+
+// Proxmox locks the template for a whole clone, so clones run one at a time, but a runner's start
+// and boot must not hold up the next runner's clone.
+func TestSpawnStartsWhileTheNextOneClones(t *testing.T) {
+	p, f, _ := setup(t)
+	p.Cfg.Network.Isolate = new(bool)
+	jit := func(context.Context, string) (*github.JITConfig, error) {
+		return &github.JITConfig{EncodedJITConfig: "x"}, nil
+	}
+	cloned := make(chan struct{})
+	var once sync.Once
+	f.Before = func(line string) {
+		switch {
+		case strings.HasPrefix(line, "pct clone 8000 9001 "):
+			once.Do(func() { close(cloned) })
+		case line == "pct start 9000":
+			select {
+			case <-cloned:
+			case <-time.After(5 * time.Second):
+				t.Error("the second clone waited for the first runner to start")
+			}
+		}
+	}
+	errs := make(chan error, 2)
+	for range 2 {
+		go func() {
+			_, err := p.Spawn(context.Background(), Request{Pool: "small", Target: org, JIT: jit})
+			errs <- err
+		}()
+	}
+	for range 2 {
+		if err := <-errs; err != nil {
+			t.Fatal(err)
+		}
+	}
+	m := f.Mutations()
+	set, clone := slices.IndexFunc(m, func(s string) bool { return strings.HasPrefix(s, "pct set 9000 ") }),
+		slices.IndexFunc(m, func(s string) bool { return strings.HasPrefix(s, "pct clone 8000 9001 ") })
+	if set < 0 || clone < set {
+		// Untagged, the first guest isn't counted, so the second spawn could pass a full pool's check.
+		t.Errorf("second clone at %d, before the first guest was tagged at %d: %q", clone, set, m)
 	}
 }
 
