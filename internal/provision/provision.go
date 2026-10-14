@@ -135,6 +135,9 @@ type Request struct {
 	JIT func(ctx context.Context, name string) (*github.JITConfig, error)
 	// Tags are added to the guest's own tags.
 	Tags []string
+	// Step, when set, is told each step of the start as it completes ("provisioning" once the guest
+	// exists, then "files pushed" and "service started").
+	Step func(vmid int, step string)
 }
 
 type Result struct {
@@ -262,6 +265,12 @@ func (p *Provisioner) Spawn(ctx context.Context, req Request) (res *Result, err 
 			}
 		}
 	}()
+	step := func(s string) {
+		if req.Step != nil {
+			req.Step(id, s)
+		}
+	}
+	step("provisioning")
 	tags := append(Tags(req.Pool, t.Owner(), pool.Mode, template, p.now()), req.Tags...)
 	if jit.Runner.ID != 0 {
 		tags = append(tags, RunnerIDTag(jit.Runner.ID))
@@ -303,8 +312,9 @@ func (p *Provisioner) Spawn(ctx context.Context, req Request) (res *Result, err 
 	if err = p.Host.Exec(ctx, pve.LXCStart(id)); err != nil {
 		return nil, err
 	}
-	// The .env goes first: gh-runner.service is enabled at boot and starts as soon as the jitconfig
-	// exists, and the runner reads .env only when it starts, so a later .env left its job without the cache.
+	// Every file goes in before the runner service starts. Images before the unit was disabled at boot
+	// still try it then; their ConditionPathExists skips it while no jitconfig exists, so the .env goes
+	// first (the runner reads it only when it starts) and the jitconfig last.
 	if pool.Cache {
 		if err = p.pushFile(ctx, id, cacheEnv, "/opt/actions-runner/.env", "0644"); err != nil {
 			return nil, err
@@ -313,9 +323,11 @@ func (p *Provisioner) Spawn(ctx context.Context, req Request) (res *Result, err 
 	if err = p.pushFile(ctx, id, jit.EncodedJITConfig, "/etc/gh-runner/jitconfig", "0600"); err != nil {
 		return nil, err
 	}
+	step("files pushed")
 	if err = p.Host.Exec(ctx, pve.LXCExec(id, "sh", "-c", startRunner)); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("runner service did not start in %d: %w", id, err)
 	}
+	step("service started")
 	return &Result{VMID: id, Name: name, RunnerID: jit.Runner.ID, RunnerName: jit.Runner.Name}, nil
 }
 
@@ -323,12 +335,15 @@ func (p *Provisioner) Spawn(ctx context.Context, req Request) (res *Result, err 
 // may not even answer on its bus yet ("Failed to connect to bus"), and a start queued while boot jobs
 // (such as systemd-sysusers) are still settling is refused as a destructive transaction, so it polls
 // until the system is running. A degraded or slow boot still goes ahead after the wait, and the runner
-// unit reports its own failures.
+// unit reports its own failures. The unit must be running afterwards: an older image's unit is
+// skipped without an error when its condition fails, and that must fail the spawn, not leave a guest
+// with no runner in it.
 const startRunner = `i=0
 until s=$(systemctl is-system-running 2>/dev/null); [ "$s" = running ] || [ "$s" = degraded ]; do
   i=$((i+1)); [ "$i" -ge 180 ] && break; sleep 1
 done
-exec systemctl start gh-runner.service`
+systemctl start gh-runner.service || exit 1
+exec systemctl is-active gh-runner.service`
 
 func (p *Provisioner) jit(ctx context.Context, req Request, name string, labels []string) (*github.JITConfig, error) {
 	if req.JIT != nil {

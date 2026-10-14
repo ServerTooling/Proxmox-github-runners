@@ -104,6 +104,8 @@ func hostFields() []section {
 				func(c *config.Config) *string { return &c.Proxmox.Bridge }),
 			boolean("autoscale.enabled", "Autoscale", "Start a runner for each queued job.",
 				func(c *config.Config) *bool { return &c.Autoscale.Enabled }),
+			duration("autoscale.start_grace", "Runner start grace", "How long a new runner may take to connect to "+
+				"GitHub before it is replaced (default 3m).", func(c *config.Config) *time.Duration { return &c.Autoscale.StartGrace }),
 		}},
 		{"Network", []field{
 			optBool("network.isolate", "Isolate runners from the LAN", "Needs the datacenter firewall on.",

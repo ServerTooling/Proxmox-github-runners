@@ -36,6 +36,9 @@ type Fake struct {
 	// UnitState maps a guest ID to what `systemctl is-active gh-runner.service` prints in it
 	// (default "active").
 	UnitState map[int]string
+	// NotRegistered lists guests whose runner never connects to GitHub (RunnerRegisteredCmd prints
+	// nothing for them; every other guest reports "registered").
+	NotRegistered map[int]bool
 	// Outputs maps a full command line to what it prints, for read-only commands like journalctl.
 	Outputs map[string]string
 	// Delay makes every command take this long, so concurrent callers interleave like on a real host.
@@ -74,6 +77,12 @@ func (f *Fake) Run(_ context.Context, name string, args ...string) ([]byte, erro
 			return []byte(state + "\n"), nil
 		}
 		return []byte(state + "\n"), fmt.Errorf("exit status 3")
+	case name == "pct" && args[0] == "exec" && strings.Contains(line, "grep -q -e 'Listening for Jobs'"):
+		id, _ := strconv.Atoi(args[1])
+		if f.NotRegistered[id] {
+			return nil, nil
+		}
+		return []byte("registered\n"), nil
 	case name == "pvesh" && args[0] == "get" && args[1] == "/cluster/firewall/options":
 		on := 0
 		if f.FirewallOn {
@@ -276,4 +285,36 @@ func (f *Fake) Mutations() []string {
 		}
 	}
 	return out
+}
+
+// SetRegistered changes whether a guest's runner reports itself connected to GitHub, safely while
+// other goroutines run commands.
+func (f *Fake) SetRegistered(id int, ok bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.NotRegistered == nil {
+		f.NotRegistered = map[int]bool{}
+	}
+	f.NotRegistered[id] = !ok
+}
+
+// Guest returns a copy of a guest by ID.
+func (f *Fake) Guest(id int) (pve.Guest, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, g := range f.Guests {
+		if g.VMID == id {
+			return g, true
+		}
+	}
+	return pve.Guest{}, false
+}
+
+// Stop marks a guest stopped, as an ephemeral runner powering itself off after its job.
+func (f *Fake) Stop(id int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if g := f.find(strconv.Itoa(id)); g != nil {
+		g.Status = "stopped"
+	}
 }

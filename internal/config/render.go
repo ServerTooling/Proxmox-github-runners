@@ -199,6 +199,9 @@ autoscale:
   # Listen to GitHub's job queue and start a runner for each queued job (outbound HTTPS only).
   # Off: runners start only with "pve-runners spawn".
   enabled: {{.Autoscale.Enabled}}
+  # How long a new runner may take to connect to GitHub. It is never removed as idle before; one that
+  # hasn't connected by then is destroyed and replaced.
+  start_grace: {{dur .Autoscale.StartGrace}}
 
 cache:
   # Host folder for pools with cache: true, one subfolder per org or account, mounted in runners at

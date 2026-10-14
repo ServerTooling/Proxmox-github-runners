@@ -115,6 +115,7 @@ var changed = map[string]string{
 	"logs.url":                   "https://logs.example.com",
 	"logs.user":                  "42",
 	"logs.interval":              "30s",
+	"autoscale.start_grace":      "5m",
 	"github.api_url":             "https://github.example.com/api/v3",
 	"github.runner_version":      "2.330.0",
 	"github.runner_sha256":       strings.Repeat("ab", 32),

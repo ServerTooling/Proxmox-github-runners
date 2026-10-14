@@ -445,3 +445,68 @@ func TestDrainGivesUpAndReleases(t *testing.T) {
 		t.Fatal("a failed drain must not keep spawns stopped")
 	}
 }
+
+// Every file the runner needs is in the guest before its service is started, and a service that
+// isn't running afterwards fails the spawn (and the guest is destroyed) instead of leaving a guest
+// with no runner in it.
+func TestRunnerServiceStartsOnlyAfterFilesAndMustRun(t *testing.T) {
+	p, f, gh := setup(t)
+	gh.RunnerGroups["Example-Org"] = gh.RunnerGroups["example-org"]
+	p.Cfg.Pools["small"].Cache = true
+	var steps []string
+	res, err := p.Spawn(context.Background(), Request{Pool: "small", Target: org,
+		Step: func(vmid int, s string) { steps = append(steps, s) }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"provisioning", "files pushed", "service started"}; !reflect.DeepEqual(steps, want) {
+		t.Fatalf("steps %q, want %q", steps, want)
+	}
+	var order []string
+	for _, c := range f.Mutations() {
+		switch {
+		case strings.HasPrefix(c, "pct start"):
+			order = append(order, "start guest")
+		case strings.HasSuffix(c, "/opt/actions-runner/.env --perms 0644"):
+			order = append(order, ".env")
+		case strings.HasSuffix(c, "/etc/gh-runner/jitconfig --perms 0600"):
+			order = append(order, "jitconfig")
+		case strings.Contains(c, "systemctl start gh-runner.service"):
+			order = append(order, "start service")
+		}
+	}
+	if want := []string{"start guest", ".env", "jitconfig", "start service"}; !reflect.DeepEqual(order, want) {
+		t.Fatalf("order %q, want %q", order, want)
+	}
+	if !strings.Contains(startRunner, "systemctl start gh-runner.service || exit 1\nexec systemctl is-active gh-runner.service") {
+		t.Fatalf("the start must check the unit is running: %s", startRunner)
+	}
+
+	// The unit was skipped or failed: the spawn fails and the guest goes.
+	f.FailOn["pct exec 9001 -- sh -c i=0"] = errors.New("exit status 3")
+	if _, err := p.Spawn(context.Background(), Request{Pool: "small", Target: org}); err == nil ||
+		!strings.Contains(err.Error(), "runner service did not start in 9001") {
+		t.Fatalf("got %v", err)
+	}
+	if _, ok := f.Guest(9001); ok {
+		t.Fatal("the guest without a running runner was left behind")
+	}
+	_ = res
+}
+
+// The image's unit waits for its config instead of being skipped, and is not started at boot.
+func TestRunnerUnitWaitsForItsConfig(t *testing.T) {
+	s := string(templateSetupScript)
+	if strings.Contains(s, "ConditionPathExists") {
+		t.Error("a ConditionPathExists skips the unit silently when the config is late")
+	}
+	if !strings.Contains(s, "ExecStartPre=+/usr/bin/timeout 60 /bin/sh -c 'until [ -s /etc/gh-runner/jitconfig ]; do sleep 1; done'") {
+		t.Error("the unit must wait up to 60 s for its config")
+	}
+	if strings.Contains(s, "systemctl enable") || !strings.Contains(s, "systemctl disable gh-runner.service") {
+		t.Error("the unit must not start at boot, before the host pushes its files")
+	}
+	if strings.Contains(s, "$i") {
+		t.Error("systemd expands $name in unit lines; the unit must not rely on shell variables")
+	}
+}

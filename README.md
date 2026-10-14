@@ -20,6 +20,10 @@ repository's releases.
   label. The service holds a long-poll on GitHub's job queue (outbound HTTPS only), claims queued
   jobs from private repositories, and starts one runner per assigned job, up to the pool's `max`
   and `proxmox.max_runners`. Restarting the service picks up the runners already running.
+  Each runner goes *provisioning* → *registered* (listening on GitHub) → *busy* → *done*; only a
+  registered runner without a job is ever removed as surplus. One that hasn't registered within
+  `autoscale.start_grace` (3m) is destroyed and replaced. Every 45 s the service also reads the
+  queued jobs from GitHub's REST API, so a job GitHub's queue statistics lose still gets a runner.
 - **Runners:** `pct clone` of your template into the reserved ID range, tagged `gh-runner`, firewall
   on, single-use runner config pushed in, runner started. The runner takes one job and powers the
   container off; the reconcile loop destroys it within 30 seconds.
@@ -147,6 +151,21 @@ logs:
 Run `pve-runners logs ship` to check it, then `systemctl reload pve-runners`. Lines are labelled
 `service="pve-runners"`, `host`, `unit` (`pve-runners` or `gh-runner`) and, for runners, `vmid`,
 `runner` and `pool`. Anything that looks like a token is masked before it leaves the host.
+
+### Runner states and alerts
+
+Every change of a runner's state is an INFO line `msg="runner state" vmid=… state=…` (`provisioning`
+with `step=provisioning|"files pushed"|"service started"`, then `registered`, `busy`, `done`, or
+`removed` with a `reason`). Warnings: `runner did not register`, `job queued too long` (over 5 minutes,
+with `queued_seconds`), and `reconcile: N queued, M runners, starting K` when the REST view starts a
+runner the statistics didn't ask for. Each reconcile also logs `msg="autoscale state"` with the gauges
+`queued_jobs`, `oldest_queued_seconds`, `runners_provisioning`, `runners_registered`, `runners_busy` and
+`runners_failed_to_register_total`. Alert queries:
+
+```
+max(max_over_time({service="pve-runners", unit="pve-runners"} |= "autoscale state" | logfmt | unwrap oldest_queued_seconds [5m])) > 600
+sum(count_over_time({service="pve-runners", unit="pve-runners"} |= "runner did not register" [10m])) > 0
+```
 
 ### Runner usage
 
