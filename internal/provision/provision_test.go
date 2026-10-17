@@ -59,7 +59,7 @@ func TestSpawnRunsExactSequence(t *testing.T) {
 	push := m[6]
 	want := []string{
 		"pct clone 8000 9000 --hostname gh-pve1-small-9000 --pool gh-runners",
-		"pct set 9000 --cores 2 --memory 2048 --tags gh-runner;pool-small;owner-example-org;mode-ephemeral;from-8000;created-1700000000;runnerid-1 --onboot 0 --description GitHub Actions runner managed by pve-runners --net0 name=eth0,bridge=vmbr1,ip=dhcp,firewall=1,tag=50",
+		"pct set 9000 --cores 2 --memory 2048 --tags gh-runner;pool-small;owner-example-org;mode-ephemeral;from-8000;created-1700000000;runnerid-1 --onboot 0 --description GitHub Actions runner managed by pve-runners --net0 name=eth0,bridge=vmbr1,hwaddr=02:00:00:00:23:28,ip=dhcp,firewall=1,tag=50",
 		"pct resize 9000 rootfs 40G",
 		"pvesh set /nodes/pve1/lxc/9000/firewall/options --enable 1 --policy_in DROP --policy_out ACCEPT --dhcp 1 --ipfilter 1",
 		"pvesh create /nodes/pve1/lxc/9000/firewall/rules --type group --action gh-runner-egress --enable 1",

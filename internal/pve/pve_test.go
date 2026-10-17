@@ -23,7 +23,7 @@ func TestCommandBuildersExactArgv(t *testing.T) {
 		{pve.LXCSet(9001, pve.LXCSpec{Cores: 2, MemoryMB: 4096, Tags: []string{"gh-runner", "pool-small"}}),
 			"pct set 9001 --cores 2 --memory 4096 --tags gh-runner;pool-small --onboot 0"},
 		{pve.LXCSet(9001, pve.LXCSpec{Cores: 1, MemoryMB: 512, Tags: []string{"gh-runner"}, Description: "d", Bridge: "vmbr1", VLAN: 50}),
-			"pct set 9001 --cores 1 --memory 512 --tags gh-runner --onboot 0 --description d --net0 name=eth0,bridge=vmbr1,ip=dhcp,firewall=1,tag=50"},
+			"pct set 9001 --cores 1 --memory 512 --tags gh-runner --onboot 0 --description d --net0 name=eth0,bridge=vmbr1,hwaddr=02:00:00:00:23:29,ip=dhcp,firewall=1,tag=50"},
 		{pve.LXCSet(9001, pve.LXCSpec{Cores: 1, MemoryMB: 512, Nameservers: []string{"192.0.2.53", "198.51.100.53"}}),
 			"pct set 9001 --cores 1 --memory 512 --tags  --onboot 0 --nameserver 192.0.2.53 198.51.100.53"},
 		{pve.LXCSet(9001, pve.LXCSpec{Cores: 1, MemoryMB: 512, CacheDir: "/var/lib/pve-runners/cache/example-org"}),
@@ -286,6 +286,15 @@ func TestHostInputBlocked(t *testing.T) {
 		got, err := (&pve.Host{R: f}).HostInputBlocked(context.Background())
 		if err != nil || got != c.want {
 			t.Errorf("on=%v policy=%q: got %v %v", c.on, c.policy, got, err)
+		}
+	}
+}
+
+// Every runner that reuses a VMID gets the same NIC address; different IDs never share one.
+func TestGuestMAC(t *testing.T) {
+	for id, want := range map[int]string{9000: "02:00:00:00:23:28", 9010: "02:00:00:00:23:32", 999999999: "02:00:3B:9A:C9:FF"} {
+		if got := pve.GuestMAC(id); got != want {
+			t.Errorf("GuestMAC(%d) = %s, want %s", id, got, want)
 		}
 	}
 }
