@@ -94,6 +94,8 @@ type Listener struct {
 	lastReconcile    time.Time
 	queued           []github.QueuedJob // the last REST view, only jobs for this scale set
 	warned           map[int64]time.Time
+	// labels tracks runner labelling still in flight (pct set runs beside the message loop).
+	labels sync.WaitGroup
 }
 
 // Runner states, as logged in "runner state" lines.
@@ -141,6 +143,7 @@ func ScaleSetTag(id int64) string { return "scaleset-" + strconv.FormatInt(id, 1
 
 // Run serves the scale set until ctx ends or the session fails; the caller restarts it with backoff.
 func (l *Listener) Run(ctx context.Context) error {
+	defer l.labels.Wait()
 	err := l.run(ctx)
 	if ctx.Err() != nil {
 		// Shutting down mid-request (opening a session, handling a message) is not a failure.
@@ -263,6 +266,11 @@ func (l *Listener) handle(ctx context.Context, sess *scaleset.Session, msg *scal
 			l.lastJob = l.now()
 			l.setBusy(j.RunnerName, true)
 			l.dropQueued(j)
+			l.labels.Add(1)
+			go func() {
+				defer l.labels.Done()
+				l.label(ctx, j)
+			}()
 			l.log().Info("job started", "listener", l.Name(), "repo", j.OwnerName+"/"+j.RepositoryName, "runner", j.RunnerName,
 				"job", j.JobDisplayName, "run_id", j.WorkflowRunID)
 		case "JobCompleted":

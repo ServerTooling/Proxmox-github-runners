@@ -28,6 +28,7 @@ func TestCommandBuildersExactArgv(t *testing.T) {
 			"pct set 9001 --cores 1 --memory 512 --tags  --onboot 0 --nameserver 192.0.2.53 198.51.100.53"},
 		{pve.LXCSet(9001, pve.LXCSpec{Cores: 1, MemoryMB: 512, CacheDir: "/var/lib/pve-runners/cache/example-org"}),
 			"pct set 9001 --cores 1 --memory 512 --tags  --onboot 0 --mp0 /var/lib/pve-runners/cache/example-org,mp=/opt/pve-cache"},
+		{pve.LXCLabelCmd(9001, []string{"gh-runner", "repo-app"}, "notes"), "pct set 9001 --tags gh-runner;repo-app --description notes"},
 		{pve.MkdirCmd("/var/lib/pve-runners/cache/example-org", "1777"), "install -d -m 1777 /var/lib/pve-runners/cache/example-org"},
 		{pve.DiskUsageCmd("/var/lib/pve-runners/cache/example-org"), "du -s -x -B1 /var/lib/pve-runners/cache/example-org"},
 		{pve.EmptyDirCmd("/var/lib/pve-runners/cache/example-org"),
