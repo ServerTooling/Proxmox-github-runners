@@ -540,6 +540,17 @@ func (s *Session) DeleteMessage(ctx context.Context, id int64) error {
 	})
 }
 
+// AcquirableJobs lists the jobs waiting for a runner of this scale set. Each job's JobAvailable message
+// goes to one session only, so a job that became available before the current session (the listener
+// restarted, or stopped reading its queue) is found only here.
+func (c *Client) AcquirableJobs(ctx context.Context, scaleSetID int64) ([]Job, error) {
+	var out struct {
+		Value []Job `json:"value"`
+	}
+	err := c.call(ctx, http.MethodGet, scaleSetEndpoint+"/"+strconv.FormatInt(scaleSetID, 10)+"/acquirablejobs", nil, nil, &out)
+	return out.Value, err
+}
+
 // AcquireJobs claims jobs for this scale set; it returns the request IDs GitHub granted.
 func (s *Session) AcquireJobs(ctx context.Context, requestIDs []int64) ([]int64, error) {
 	base, _, err := s.c.connect(ctx)

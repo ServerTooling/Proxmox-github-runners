@@ -38,6 +38,7 @@ import (
 type Service interface {
 	EnsureScaleSet(ctx context.Context, name string, groupID int64, labels []string) (*scaleset.ScaleSet, error)
 	CreateSession(ctx context.Context, scaleSetID int64, owner string) (*scaleset.Session, error)
+	AcquirableJobs(ctx context.Context, scaleSetID int64) ([]scaleset.Job, error)
 	GenerateJIT(ctx context.Context, scaleSetID int64, name, workFolder string) (*scaleset.JITConfig, error)
 	RemoveRunner(ctx context.Context, id int64) error
 }
@@ -186,6 +187,9 @@ func (l *Listener) run(ctx context.Context) error {
 		l.lastJob = l.now()
 	}
 
+	if err := l.claimWaiting(ctx, sess); err != nil {
+		l.log().Warn("claim jobs that were waiting before this session", "listener", l.Name(), "err", err)
+	}
 	stats := sess.Statistics()
 	l.scale(ctx, stats)
 	var lastID int64
@@ -242,6 +246,32 @@ func (l *Listener) capacity() int {
 		return l.HostMax
 	}
 	return l.Pool.Max
+}
+
+// claimWaiting claims the jobs that became available before this session opened. Their JobAvailable
+// messages went to the previous session, so without this they stay queued with idle runners beside them.
+func (l *Listener) claimWaiting(ctx context.Context, sess *scaleset.Session) error {
+	jobs, err := l.Service.AcquirableJobs(ctx, l.scaleSetID)
+	if err != nil {
+		return err
+	}
+	var claim []int64
+	for _, j := range jobs {
+		if l.serves(ctx, j) {
+			claim = append(claim, j.RunnerRequestID)
+		}
+	}
+	if len(claim) == 0 {
+		return nil
+	}
+	got, err := sess.AcquireJobs(ctx, claim)
+	if err != nil {
+		return err
+	}
+	l.lastJob = l.now()
+	l.log().Info("acquired jobs waiting from before this session", "listener", l.Name(), "requested", len(claim),
+		"acquired", len(got))
+	return nil
 }
 
 // handle claims the message's available jobs from repositories this target serves, then

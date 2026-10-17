@@ -75,6 +75,8 @@ type Fake struct {
 	removed   []int64
 	busy      map[int64]bool
 	wake      chan struct{}
+	// Waiting is what acquirablejobs lists: jobs that became available before the current session.
+	Waiting []Job
 	// NoRunnerLookup makes the runner lookup answer 404, as if the endpoint were unavailable.
 	NoRunnerLookup bool
 	// Assigned is reported as totalAssignedJobs in session and message statistics.
@@ -342,6 +344,12 @@ func (f *Fake) serve(w http.ResponseWriter, r *http.Request) {
 		s.ID = int64(len(f.scaleSets) + 1)
 		f.scaleSets = append(f.scaleSets, &s)
 		writeJSON(w, 200, s)
+	case parts[0] == "runnerscalesets" && len(parts) == 3 && parts[2] == "acquirablejobs" && r.Method == http.MethodGet:
+		if len(f.Waiting) == 0 {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		writeJSON(w, 200, map[string]any{"count": len(f.Waiting), "value": f.Waiting})
 	case parts[0] == "runnerscalesets" && len(parts) == 3 && parts[2] == "generatejitconfig":
 		var req struct{ Name string }
 		json.Unmarshal(body, &req)
