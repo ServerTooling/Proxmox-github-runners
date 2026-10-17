@@ -97,7 +97,7 @@ func LXCSet(id int, s LXCSpec) Cmd {
 		args = append(args, "--description", s.Description)
 	}
 	if s.Bridge != "" {
-		net := "name=eth0,bridge=" + s.Bridge + ",ip=dhcp,firewall=1"
+		net := "name=eth0,bridge=" + s.Bridge + ",hwaddr=" + GuestMAC(id) + ",ip=dhcp,firewall=1"
 		if s.VLAN > 0 {
 			net += ",tag=" + strconv.Itoa(s.VLAN)
 		}
@@ -111,6 +111,13 @@ func LXCSet(id int, s LXCSpec) Cmd {
 		args = append(args, "--mp0", s.CacheDir+",mp="+CacheMount)
 	}
 	return Cmd{"pct", args}
+}
+
+// GuestMAC is the NIC address of guest id: the same for every runner that reuses the ID, so the
+// LAN's DHCP server and firewall see one device per runner slot instead of a new one per job.
+// 02: marks a locally administered address, which no vendor's hardware uses.
+func GuestMAC(id int) string {
+	return fmt.Sprintf("02:00:%02X:%02X:%02X:%02X", byte(id>>24), byte(id>>16), byte(id>>8), byte(id))
 }
 
 // LXCResize grows the root disk to an absolute size. Proxmox never shrinks disks, so a disk_gb at or
