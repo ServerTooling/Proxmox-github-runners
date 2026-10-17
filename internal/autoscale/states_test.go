@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"log/slog"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -312,5 +313,46 @@ func TestTwoJobsSpawnTogether(t *testing.T) {
 	eventually(t, "two runners", func() bool { return len(h.runners(t)) == 2 })
 	if n := len(h.svc.JITNames()); n != 2 {
 		t.Errorf("%d runners registered for two jobs", n)
+	}
+}
+
+// The incident of 2026-10-17: the jobs stay queued past the grace while registered runners sit idle
+// beside them, because the message session lost them. The listener claims the waiting jobs again,
+// and when there are none to claim it opens a new session.
+func TestLostJobsAreClaimedAgain(t *testing.T) {
+	h := newHarness(t)
+	c := withClock(h)
+	logs := withLog(h)
+	q := withQueue(h)
+	q.set(github.QueuedJob{ID: 1, Name: "build", Labels: []string{"proxmox"}, CreatedAt: c.now().Add(-10 * time.Minute),
+		Repo: "example-org/app"})
+	h.start(t)
+	eventually(t, "an idle registered runner", func() bool { return strings.Contains(logs.String(), "state=registered") })
+	time.Sleep(20 * time.Millisecond)
+	if len(h.svc.Acquired()) != 0 {
+		t.Fatalf("claimed before the jobs had waited beside an idle runner: %v", h.svc.Acquired())
+	}
+
+	h.svc.SetWaiting(scalesettest.Job{Type: "JobAvailable", RunnerRequestID: 77, RepositoryName: "app", OwnerName: "example-org"})
+	c.advance(unclaimedAfter + time.Second)
+	eventually(t, "the job claimed again", func() bool { return slices.Equal(h.svc.Acquired(), []int64{77}) })
+	sessions := "/svc/_apis/runtime/runnerscalesets/1/sessions"
+	time.Sleep(20 * time.Millisecond)
+	if n := len(h.svc.CallsTo("POST", sessions)); n != 1 {
+		t.Fatalf("%d sessions opened although the claim worked", n)
+	}
+
+	// Still queued, and now nothing is claimable: the session is replaced, at most every reclaimEvery.
+	h.svc.SetWaiting()
+	c.advance(time.Minute)
+	time.Sleep(20 * time.Millisecond)
+	if n := len(h.svc.CallsTo("POST", sessions)); n != 1 {
+		t.Fatalf("session replaced %d times within reclaimEvery", n-1)
+	}
+	c.advance(reclaimEvery)
+	eventually(t, "a new session", func() bool { return len(h.svc.CallsTo("POST", sessions)) == 2 })
+	eventually(t, "the old session closed", func() bool { return h.svc.Sessions() == 1 })
+	if !strings.Contains(logs.String(), "no job could be claimed; opening a new message session") {
+		t.Errorf("log lacks the renewal:\n%s", logs.String())
 	}
 }

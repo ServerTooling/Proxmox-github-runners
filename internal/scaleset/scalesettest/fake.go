@@ -141,6 +141,13 @@ func (f *Fake) Sessions() int {
 	return len(f.sessions)
 }
 
+// SetWaiting replaces Waiting while a listener runs.
+func (f *Fake) SetWaiting(jobs ...Job) {
+	f.mu.Lock()
+	f.Waiting = jobs
+	f.mu.Unlock()
+}
+
 func (f *Fake) Acquired() []int64 {
 	f.mu.Lock()
 	defer f.mu.Unlock()
