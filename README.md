@@ -26,7 +26,9 @@ repository's releases.
   queued jobs from GitHub's REST API, so a job GitHub's queue statistics lose still gets a runner.
 - **Runners:** `pct clone` of your template into the reserved ID range, tagged `gh-runner`, firewall
   on, single-use runner config pushed in, runner started. The runner takes one job and powers the
-  container off; the reconcile loop destroys it within 30 seconds.
+  container off; the reconcile loop destroys it within 30 seconds. When a job starts, the container
+  gets `repo-<name>` and `branch-<name>` (or `pr-<n>`, `tag-<name>`) tags, and its notes name the
+  repository, job, workflow and run link.
 - **Images:** [templates/](templates/) defines runner images with Ansible. CI builds, smoke-tests,
   signs and publishes them as `template-<name>-<date>-<run>` releases. The host downloads the newest
   one, checks the signature and checksum, keeps it in the Proxmox template cache and creates a

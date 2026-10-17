@@ -77,6 +77,12 @@ type LXCSpec struct {
 	CacheDir string
 }
 
+// LXCLabelCmd replaces a guest's tags and notes (the description Proxmox shows), leaving the rest of
+// its config alone.
+func LXCLabelCmd(id int, tags []string, description string) Cmd {
+	return Cmd{"pct", []string{"set", strconv.Itoa(id), "--tags", strings.Join(tags, ";"), "--description", description}}
+}
+
 // CacheMount is where a runner sees its owner's shared cache folder.
 const CacheMount = "/opt/pve-cache"
 

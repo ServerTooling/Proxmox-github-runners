@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -356,5 +357,52 @@ func TestJobsAreRememberedPerRunner(t *testing.T) {
 	stop()
 	if _, ok := h.l.Jobs.Of("gh-pve1-small-9000"); ok {
 		t.Error("a finished job is still remembered")
+	}
+}
+
+func TestJobTags(t *testing.T) {
+	job := func(ref string) scaleset.Job {
+		return scaleset.Job{OwnerName: "Example-Org", RepositoryName: "App", JobWorkflowRef: ref}
+	}
+	cases := []struct {
+		ref  string
+		want []string
+	}{
+		{"example-org/app/.github/workflows/ci.yml@refs/heads/main", []string{"repo-app", "branch-main"}},
+		{"Example-Org/App/.github/workflows/ci.yml@refs/heads/feature/Login_v2", []string{"repo-app", "branch-feature-login_v2"}},
+		{"example-org/app/.github/workflows/ci.yml@refs/pull/12/merge", []string{"repo-app", "pr-12"}},
+		{"example-org/app/.github/workflows/release.yml@refs/tags/v1.2", []string{"repo-app", "tag-v1.2"}},
+		// A reusable workflow from another repository names its own ref, not the job's.
+		{"example-org/shared/.github/workflows/build.yml@refs/heads/main", []string{"repo-app"}},
+		{"", []string{"repo-app"}},
+	}
+	for _, c := range cases {
+		if got := JobTags(job(c.ref)); !slices.Equal(got, c.want) {
+			t.Errorf("%q: got %v, want %v", c.ref, got, c.want)
+		}
+	}
+}
+
+// A started job tags its runner's guest with the repository and branch and puts the details in its
+// notes; a persistent runner's next job replaces them.
+func TestStartedJobLabelsRunner(t *testing.T) {
+	h := newHarness(t, pve.Guest{VMID: 9003, Type: "lxc", Name: "gh-pve1-small-9003", Node: "pve1", Status: "running",
+		RawTags: "gh-runner;owner-example-org;repo-old;pr-7"})
+	stop := h.start(t)
+	h.svc.Push(0, scalesettest.Job{Type: "JobStarted", RepositoryName: "app", OwnerName: "example-org",
+		RunnerName: "gh-pve1-small-9003", JobDisplayName: "unit (2, 4)",
+		JobWorkflowRef: "example-org/app/.github/workflows/ci.yml@refs/heads/develop", WorkflowRunID: 42})
+	eventually(t, "message ack", func() bool { return h.svc.Pending() == 0 })
+	stop()
+	g, _ := h.pve.Guest(9003)
+	if want := "gh-runner;owner-example-org;repo-app;branch-develop"; g.RawTags != want {
+		t.Errorf("tags %q, want %q", g.RawTags, want)
+	}
+	want := "pct set 9003 --tags gh-runner;owner-example-org;repo-app;branch-develop --description " +
+		"GitHub Actions runner managed by pve-runners\n\nRunning example-org/app, job \"unit (2, 4)\"\n" +
+		"Workflow: example-org/app/.github/workflows/ci.yml@refs/heads/develop\n" +
+		"Run: https://github.com/example-org/app/actions/runs/42"
+	if !slices.Contains(h.pve.Mutations(), want) {
+		t.Errorf("no labelling call in %q", h.pve.Mutations())
 	}
 }
