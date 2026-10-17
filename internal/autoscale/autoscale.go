@@ -97,6 +97,11 @@ type Listener struct {
 	warned           map[int64]time.Time
 	// labels tracks runner labelling still in flight (pct set runs beside the message loop).
 	labels sync.WaitGroup
+	// unclaimedSince is when jobs queued past the grace were first seen beside idle registered runners;
+	// lastReclaim is when the listener last asked GitHub for them again. renew asks run for a new session.
+	unclaimedSince time.Time
+	lastReclaim    time.Time
+	renew          bool
 }
 
 // Runner states, as logged in "runner state" lines.
@@ -109,6 +114,18 @@ const (
 
 // queuedWarnAfter is how long a job may wait for a runner before every reconcile warns about it.
 const queuedWarnAfter = 5 * time.Minute
+
+// A registered runner gets its job within seconds. Jobs that stay queued past the start grace beside
+// idle registered runners for unclaimedAfter were lost by the message session (on 2026-10-17 the
+// listener stopped polling during a 15-minute clone and GitHub never assigned the jobs that came
+// meanwhile), so they are claimed again, at most every reclaimEvery, and when none can be claimed the
+// session is replaced: a new session claims what is waiting when it opens.
+const (
+	unclaimedAfter = 2 * time.Minute
+	reclaimEvery   = 5 * time.Minute
+)
+
+var errRenewSession = errors.New("renew message session")
 
 type privEntry struct {
 	ok  bool
@@ -146,6 +163,9 @@ func ScaleSetTag(id int64) string { return "scaleset-" + strconv.FormatInt(id, 1
 func (l *Listener) Run(ctx context.Context) error {
 	defer l.labels.Wait()
 	err := l.run(ctx)
+	for errors.Is(err, errRenewSession) && ctx.Err() == nil {
+		err = l.run(ctx)
+	}
 	if ctx.Err() != nil {
 		// Shutting down mid-request (opening a session, handling a message) is not a failure.
 		return nil
@@ -187,11 +207,11 @@ func (l *Listener) run(ctx context.Context) error {
 		l.lastJob = l.now()
 	}
 
-	if err := l.claimWaiting(ctx, sess); err != nil {
+	if _, err := l.claimWaiting(ctx, sess); err != nil {
 		l.log().Warn("claim jobs that were waiting before this session", "listener", l.Name(), "err", err)
 	}
 	stats := sess.Statistics()
-	l.scale(ctx, stats)
+	l.scale(ctx, sess, stats)
 	var lastID int64
 	for {
 		msg, err := sess.GetMessage(ctx, lastID, l.capacity())
@@ -211,7 +231,11 @@ func (l *Listener) run(ctx context.Context) error {
 			}
 		}
 		// Also on empty polls: replaces runners whose spawn failed or that ended without a job.
-		l.scale(ctx, stats)
+		l.scale(ctx, sess, stats)
+		if l.renew {
+			l.renew = false
+			return errRenewSession
+		}
 	}
 }
 
@@ -250,10 +274,10 @@ func (l *Listener) capacity() int {
 
 // claimWaiting claims the jobs that became available before this session opened. Their JobAvailable
 // messages went to the previous session, so without this they stay queued with idle runners beside them.
-func (l *Listener) claimWaiting(ctx context.Context, sess *scaleset.Session) error {
+func (l *Listener) claimWaiting(ctx context.Context, sess *scaleset.Session) (int, error) {
 	jobs, err := l.Service.AcquirableJobs(ctx, l.scaleSetID)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	var claim []int64
 	for _, j := range jobs {
@@ -262,16 +286,42 @@ func (l *Listener) claimWaiting(ctx context.Context, sess *scaleset.Session) err
 		}
 	}
 	if len(claim) == 0 {
-		return nil
+		return 0, nil
 	}
 	got, err := sess.AcquireJobs(ctx, claim)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	l.lastJob = l.now()
-	l.log().Info("acquired jobs waiting from before this session", "listener", l.Name(), "requested", len(claim),
-		"acquired", len(got))
-	return nil
+	l.log().Info("acquired waiting jobs", "listener", l.Name(), "requested", len(claim), "acquired", len(got))
+	return len(got), nil
+}
+
+// reclaim handles jobs the message session lost (see unclaimedAfter): it claims the waiting jobs again
+// and, when none could be claimed, has run open a new session.
+func (l *Listener) reclaim(ctx context.Context, sess *scaleset.Session, f fleet, stats scaleset.Statistics, stale int) {
+	idle := f.live - f.provisioning - f.busy
+	if stale == 0 || idle == 0 || stats.TotalAssignedJobs > f.busy {
+		l.unclaimedSince = time.Time{}
+		return
+	}
+	if l.unclaimedSince.IsZero() {
+		l.unclaimedSince = l.now()
+	}
+	if l.now().Sub(l.unclaimedSince) < unclaimedAfter || l.now().Sub(l.lastReclaim) < reclaimEvery {
+		return
+	}
+	l.lastReclaim = l.now()
+	l.log().Warn("jobs queued beside idle runners; claiming them again", "listener", l.Name(),
+		"queued_past_grace", stale, "runners_registered", idle)
+	n, err := l.claimWaiting(ctx, sess)
+	if err != nil {
+		l.log().Warn("claim waiting jobs", "listener", l.Name(), "err", err)
+	}
+	if n == 0 {
+		l.log().Warn("no job could be claimed; opening a new message session", "listener", l.Name())
+		l.renew = true
+	}
 }
 
 // handle claims the message's available jobs from repositories this target serves, then
@@ -640,7 +690,7 @@ func (l *Listener) warnQueued() {
 	l.warned = keep
 }
 
-func (l *Listener) scale(ctx context.Context, stats scaleset.Statistics) {
+func (l *Listener) scale(ctx context.Context, sess *scaleset.Session, stats scaleset.Statistics) {
 	tick := l.Queued != nil && l.now().Sub(l.lastReconcile) >= cmp.Or(l.ReconcileEvery, 45*time.Second)
 	stale := l.reconcile(ctx)
 	f, err := l.survey(ctx)
@@ -653,6 +703,7 @@ func (l *Listener) scale(ctx context.Context, stats scaleset.Statistics) {
 	have := f.live
 	if tick {
 		l.logState(f, stats, stale, want)
+		l.reclaim(ctx, sess, f, stats, stale)
 	}
 	if have > want {
 		l.trim(ctx, f.spare, have-want)
