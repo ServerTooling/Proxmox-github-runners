@@ -406,3 +406,23 @@ func TestStartedJobLabelsRunner(t *testing.T) {
 		t.Errorf("no labelling call in %q", h.pve.Mutations())
 	}
 }
+
+// A job that became available before this session (its message went to the session of the process
+// that restarted) is listed by acquirablejobs and claimed at start; a public repo's job is not.
+func TestClaimsJobsWaitingFromBeforeTheSession(t *testing.T) {
+	h := newHarness(t)
+	h.public["example-org/site"] = true
+	h.svc.Waiting = []scalesettest.Job{
+		{Type: "JobAvailable", RunnerRequestID: 91, RepositoryName: "app", OwnerName: "example-org"},
+		{Type: "JobAvailable", RunnerRequestID: 92, RepositoryName: "site", OwnerName: "example-org"},
+	}
+	h.start(t)
+	eventually(t, "claim", func() bool { return len(h.svc.Acquired()) > 0 })
+	if got := h.svc.Acquired(); !slices.Equal(got, []int64{91}) {
+		t.Fatalf("acquired = %v", got)
+	}
+	if calls := h.svc.CallsTo("GET", "/svc/_apis/runtime/runnerscalesets/1/acquirablejobs"); len(calls) != 1 ||
+		calls[0].Query != "api-version=6.0-preview" || calls[0].Auth == "Bearer "+scalesettest.QueueToken {
+		t.Errorf("acquirablejobs calls = %+v", calls)
+	}
+}
