@@ -555,3 +555,44 @@ func TestRunnerUnitWaitsForItsConfig(t *testing.T) {
 		t.Error("systemd expands $name in unit lines; the unit must not rely on shell variables")
 	}
 }
+
+// hangingClone is the host with a pct clone that never returns on its own, like the real one did.
+type hangingClone struct{ *pvetest.Fake }
+
+func (h hangingClone) Run(ctx context.Context, name string, args ...string) ([]byte, error) {
+	if name == "pct" && len(args) > 0 && args[0] == "clone" {
+		<-ctx.Done()
+		return nil, errors.New("signal: killed")
+	}
+	return h.Fake.Run(ctx, name, args...)
+}
+
+func TestSpawnStopsAHungClone(t *testing.T) {
+	p, f, _ := setup(t)
+	p.Cfg.Network.Isolate = new(bool)
+	p.Host.R = hangingClone{f}
+	old := cloneTimeout
+	cloneTimeout = 50 * time.Millisecond
+	t.Cleanup(func() { cloneTimeout = old })
+	jit := func(context.Context, string) (*github.JITConfig, error) {
+		return &github.JITConfig{EncodedJITConfig: "x"}, nil
+	}
+	done := make(chan error, 1)
+	go func() {
+		_, err := p.Spawn(context.Background(), Request{Pool: "small", Target: org, JIT: jit})
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err == nil || !strings.Contains(err.Error(), "pct clone 9000 of template 8000 did not finish") {
+			t.Fatalf("err = %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Spawn still waits for a hung clone")
+	}
+	// The next spawn isn't held up by the lock the hung one took.
+	p.Host.R = f
+	if _, err := p.Spawn(context.Background(), Request{Pool: "small", Target: org, JIT: jit}); err != nil {
+		t.Fatal(err)
+	}
+}
