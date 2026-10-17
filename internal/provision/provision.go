@@ -163,6 +163,10 @@ func (p *Provisioner) now() time.Time {
 	return time.Now()
 }
 
+// cloneTimeout bounds one pct clone. A full clone takes a minute or two; one that hung (seen on a host
+// at 14+ minutes) held up its listener's other spawns and every queued job with them.
+var cloneTimeout = 15 * time.Minute
+
 // Spawn creates one ephemeral runner. Any failure after the clone destroys the half-built guest.
 func (p *Provisioner) Spawn(ctx context.Context, req Request) (res *Result, err error) {
 	inFlight.Add(1)
@@ -265,8 +269,16 @@ func (p *Provisioner) Spawn(ctx context.Context, req Request) (res *Result, err 
 	}
 	// Logged before the clone, which can take a minute or more on storage without linked clones.
 	step("provisioning")
-	if err := p.Host.Exec(ctx, pve.LXCClone(template, id, name, p.Cfg.Proxmox.Pool, p.Cfg.Proxmox.Storage,
-		pool.FullClone || p.NoLinkedClones)); err != nil {
+	cctx, cancel := context.WithTimeout(ctx, cloneTimeout)
+	err = p.Host.Exec(cctx, pve.LXCClone(template, id, name, p.Cfg.Proxmox.Pool, p.Cfg.Proxmox.Storage,
+		pool.FullClone || p.NoLinkedClones))
+	timedOut := cctx.Err() == context.DeadlineExceeded
+	cancel()
+	if timedOut {
+		return nil, fmt.Errorf("pct clone %d of template %d did not finish within %s and was stopped; check for a "+
+			"leftover CT %d (pct unlock %d && pct destroy %d): %w", id, template, cloneTimeout, id, id, id, err)
+	}
+	if err != nil {
 		return nil, err
 	}
 	defer func() {
