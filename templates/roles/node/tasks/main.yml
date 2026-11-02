@@ -29,12 +29,30 @@
     dest: /usr/local/lib/nodejs
     state: link
 
-- name: Put node, npm, npx and corepack on PATH
+- name: Put node, npm and npx on PATH
   ansible.builtin.file:
     src: "/usr/local/lib/nodejs/bin/{{ item }}"
     dest: "/usr/local/bin/{{ item }}"
     state: link
-  loop: [node, npm, npx, corepack]
+  loop: [node, npm, npx]
+
+# Node.js 25 and later no longer bundle corepack; npm publishes it instead (npm checks the
+# registry's integrity hash), so yarn and pnpm stay available on every LTS.
+- name: Check for bundled corepack
+  ansible.builtin.stat:
+    path: /usr/local/lib/nodejs/bin/corepack
+  register: corepack_bundled
+
+- name: Install corepack from npm
+  ansible.builtin.command: npm install --global corepack
+  when: not corepack_bundled.stat.exists
+  changed_when: true
+
+- name: Put corepack on PATH
+  ansible.builtin.file:
+    src: /usr/local/lib/nodejs/bin/corepack
+    dest: /usr/local/bin/corepack
+    state: link
 
 - name: Enable corepack (yarn, pnpm)
   ansible.builtin.command: corepack enable --install-directory /usr/local/bin
