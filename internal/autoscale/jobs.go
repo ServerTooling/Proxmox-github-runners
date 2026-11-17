@@ -2,12 +2,14 @@ package autoscale
 
 import (
 	"context"
+	"path"
 	"slices"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/ServerTooling/proxmox-github-runners/internal/github"
 	"github.com/ServerTooling/proxmox-github-runners/internal/pve"
 	"github.com/ServerTooling/proxmox-github-runners/internal/scaleset"
 )
@@ -56,31 +58,49 @@ func (j *Jobs) Of(runner string) (JobInfo, bool) {
 	return info, ok
 }
 
-// Job tags name what a runner is building, so the Proxmox guest list shows it: repo-<name> and one of
-// branch-<name>, pr-<number> or tag-<name>. The owner is already in owner-<org>.
-var jobTagPrefixes = []string{"repo-", "branch-", "pr-", "tag-"}
+// Job tags name what a runner is building, so the Proxmox guest list (and the app) shows it:
+// repo-<name>, one of branch-<name>, pr-<number> or tag-<name>, wf-<workflow file>, job-<job name> and
+// run-<run ID> (the ID in the run's URL). The owner is already in owner-<org>.
+var jobTagPrefixes = []string{"repo-", "branch-", "pr-", "tag-", "wf-", "job-", "run-"}
 
-// JobTags returns the job tags for a started job. The ref comes from the job's workflow ref, so it is
-// left out when the workflow lives in another repository (a reusable workflow names its own ref).
-func JobTags(j scaleset.Job) []string {
+// maxTagValue keeps a tag short enough to read in the guest list; the notes hold the full names.
+const maxTagValue = 40
+
+// JobTags returns the job tags for a started job. headBranch is the run's head branch as the REST API
+// reports it ("" if unknown); a pull request's workflow ref only names refs/pull/<n>/merge, so this is
+// the only way to know its branch. The ref comes from the job's workflow ref, so it is left out when
+// the workflow lives in another repository (a reusable workflow names its own ref and file).
+func JobTags(j scaleset.Job, headBranch string) []string {
 	tags := []string{"repo-" + tagSafe(j.RepositoryName)}
-	repo, ref, ok := strings.Cut(j.JobWorkflowRef, "@")
-	if !ok || !strings.HasPrefix(strings.ToLower(repo), strings.ToLower(j.OwnerName+"/"+j.RepositoryName+"/")) {
-		return tags
+	add := func(prefix, v string) {
+		if v = tagSafe(v); v != "" {
+			tags = append(tags, prefix+v)
+		}
 	}
-	if b, ok := strings.CutPrefix(ref, "refs/heads/"); ok {
-		tags = append(tags, "branch-"+tagSafe(b))
-	} else if t, ok := strings.CutPrefix(ref, "refs/tags/"); ok {
-		tags = append(tags, "tag-"+tagSafe(t))
-	} else if pr, ok := strings.CutPrefix(ref, "refs/pull/"); ok {
-		n, _, _ := strings.Cut(pr, "/")
-		tags = append(tags, "pr-"+tagSafe(n))
+	repo, ref, ok := strings.Cut(j.JobWorkflowRef, "@")
+	own := ok && strings.HasPrefix(strings.ToLower(repo), strings.ToLower(j.OwnerName+"/"+j.RepositoryName+"/"))
+	if own {
+		if b, ok := strings.CutPrefix(ref, "refs/heads/"); ok {
+			add("branch-", b)
+		} else if t, ok := strings.CutPrefix(ref, "refs/tags/"); ok {
+			add("tag-", t)
+		} else if pr, ok := strings.CutPrefix(ref, "refs/pull/"); ok {
+			n, _, _ := strings.Cut(pr, "/")
+			add("pr-", n)
+			add("branch-", headBranch)
+		}
+		file := path.Base(repo)
+		add("wf-", strings.TrimSuffix(strings.TrimSuffix(file, ".yml"), ".yaml"))
+	}
+	add("job-", j.JobDisplayName)
+	if j.WorkflowRunID != 0 {
+		tags = append(tags, "run-"+strconv.FormatInt(j.WorkflowRunID, 10))
 	}
 	return tags
 }
 
 // jobNotes is the guest description while it runs a job: the exact names tags can't hold.
-func jobNotes(j scaleset.Job) string {
+func jobNotes(j scaleset.Job, run github.Run) string {
 	repo := j.OwnerName + "/" + j.RepositoryName
 	s := "GitHub Actions runner managed by pve-runners\n\nRunning " + repo
 	if j.JobDisplayName != "" {
@@ -89,8 +109,15 @@ func jobNotes(j scaleset.Job) string {
 	if j.JobWorkflowRef != "" {
 		s += "\nWorkflow: " + j.JobWorkflowRef
 	}
+	if run.HeadBranch != "" {
+		s += "\nBranch: " + run.HeadBranch
+	}
 	if j.WorkflowRunID != 0 {
-		s += "\nRun: https://github.com/" + repo + "/actions/runs/" + strconv.FormatInt(j.WorkflowRunID, 10)
+		s += "\nRun"
+		if run.Number != 0 {
+			s += " #" + strconv.FormatInt(run.Number, 10)
+		}
+		s += ": https://github.com/" + repo + "/actions/runs/" + strconv.FormatInt(j.WorkflowRunID, 10)
 	}
 	return s
 }
@@ -113,26 +140,43 @@ func (l *Listener) label(ctx context.Context, j scaleset.Job) {
 		return
 	}
 	g := gs[i]
+	var run github.Run
+	if l.WorkflowRun != nil && j.WorkflowRunID != 0 {
+		if run, err = l.WorkflowRun(ctx, j.OwnerName, j.RepositoryName, j.WorkflowRunID); err != nil {
+			// The tags without the branch are still worth having.
+			l.log().Warn("reading workflow run failed", "listener", l.Name(), "run_id", j.WorkflowRunID, "err", err)
+		}
+	}
 	// A persistent runner keeps its guest between jobs, so the previous job's tags go first.
 	tags := slices.DeleteFunc(g.Tags(), func(t string) bool {
 		return slices.ContainsFunc(jobTagPrefixes, func(p string) bool { return strings.HasPrefix(t, p) })
 	})
-	tags = append(tags, JobTags(j)...)
-	if err := l.Host.Exec(ctx, pve.LXCLabelCmd(g.VMID, tags, jobNotes(j))); err != nil {
+	tags = append(tags, JobTags(j, run.HeadBranch)...)
+	if err := l.Host.Exec(ctx, pve.LXCLabelCmd(g.VMID, tags, jobNotes(j, run))); err != nil {
 		l.log().Warn("labelling runner failed", "listener", l.Name(), "vmid", g.VMID, "err", err)
 	}
 }
 
-// tagSafe keeps what Proxmox allows in a tag ([a-z0-9_+.-]); '/' becomes '-' so branch paths stay readable.
+// tagSafe keeps what Proxmox allows in a tag ([a-z0-9_+.-]). Anything else ('/', spaces, brackets)
+// becomes one '-', so "feature/x" and "unit (2, 4)" stay readable, and the result is capped at maxTagValue.
 func tagSafe(s string) string {
 	var b strings.Builder
+	dash := false
 	for _, r := range strings.ToLower(s) {
 		switch {
 		case r >= 'a' && r <= 'z', r >= '0' && r <= '9', r == '-', r == '_', r == '.':
+			if dash && b.Len() > 0 && r != '-' {
+				b.WriteByte('-')
+			}
+			dash = false
 			b.WriteRune(r)
-		case r == '/':
-			b.WriteRune('-')
+		default:
+			dash = true
 		}
 	}
-	return b.String()
+	out := b.String()
+	if len(out) > maxTagValue {
+		out = out[:maxTagValue]
+	}
+	return strings.Trim(out, "-")
 }

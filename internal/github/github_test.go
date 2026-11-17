@@ -183,3 +183,24 @@ func TestQueuedJobsReadsQueuedAndInProgressRuns(t *testing.T) {
 		t.Fatalf("requests\n got %q\nwant %q", f.RunQueries, want)
 	}
 }
+
+func TestWorkflowRun(t *testing.T) {
+	f := githubtest.New(42)
+	defer f.Close()
+	f.Runs = map[string][]map[string]any{"example-org/app": {
+		{"id": 10, "status": "in_progress", "head_branch": "feature/login", "run_number": 17}}}
+	c := github.NewClient(f.URL, 42, f.Key)
+	run, err := c.WorkflowRun(context.Background(), 5, "example-org", "app", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run != (github.Run{HeadBranch: "feature/login", Number: 17}) {
+		t.Fatalf("run = %+v", run)
+	}
+	if want := []string{"/repos/example-org/app/actions/runs/10?"}; !reflect.DeepEqual(f.RunQueries, want) {
+		t.Fatalf("requests %q, want %q", f.RunQueries, want)
+	}
+	if _, err := c.WorkflowRun(context.Background(), 5, "example-org", "app", 11); err == nil {
+		t.Fatal("a missing run read without error")
+	}
+}

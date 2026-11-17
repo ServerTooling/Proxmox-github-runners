@@ -77,6 +77,9 @@ type Listener struct {
 	// ReconcileEvery (0 = 45s) to correct statistics that lost a job.
 	Queued         func(ctx context.Context) ([]github.QueuedJob, error)
 	ReconcileEvery time.Duration
+	// WorkflowRun, when set, reads a workflow run from the REST API, so a started job's tags can name the
+	// branch of a pull request (its job message only names refs/pull/<n>/merge).
+	WorkflowRun func(ctx context.Context, owner, repo string, id int64) (github.Run, error)
 
 	scaleSetID int64
 	lastFail   string
