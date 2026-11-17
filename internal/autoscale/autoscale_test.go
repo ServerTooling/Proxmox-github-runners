@@ -3,6 +3,7 @@ package autoscale
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"slices"
 	"strings"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"github.com/ServerTooling/proxmox-github-runners/internal/config"
+	"github.com/ServerTooling/proxmox-github-runners/internal/github"
 	"github.com/ServerTooling/proxmox-github-runners/internal/provision"
 	"github.com/ServerTooling/proxmox-github-runners/internal/pve"
 	"github.com/ServerTooling/proxmox-github-runners/internal/pve/pvetest"
@@ -365,21 +367,39 @@ func TestJobTags(t *testing.T) {
 		return scaleset.Job{OwnerName: "Example-Org", RepositoryName: "App", JobWorkflowRef: ref}
 	}
 	cases := []struct {
-		ref  string
-		want []string
+		ref, head string
+		want      []string
 	}{
-		{"example-org/app/.github/workflows/ci.yml@refs/heads/main", []string{"repo-app", "branch-main"}},
-		{"Example-Org/App/.github/workflows/ci.yml@refs/heads/feature/Login_v2", []string{"repo-app", "branch-feature-login_v2"}},
-		{"example-org/app/.github/workflows/ci.yml@refs/pull/12/merge", []string{"repo-app", "pr-12"}},
-		{"example-org/app/.github/workflows/release.yml@refs/tags/v1.2", []string{"repo-app", "tag-v1.2"}},
-		// A reusable workflow from another repository names its own ref, not the job's.
-		{"example-org/shared/.github/workflows/build.yml@refs/heads/main", []string{"repo-app"}},
-		{"", []string{"repo-app"}},
+		{"example-org/app/.github/workflows/ci.yml@refs/heads/main", "", []string{"repo-app", "branch-main", "wf-ci"}},
+		{"Example-Org/App/.github/workflows/Build.yaml@refs/heads/feature/Login_v2", "",
+			[]string{"repo-app", "branch-feature-login_v2", "wf-build"}},
+		// A pull request's ref only names its number; the branch comes from the run.
+		{"example-org/app/.github/workflows/ci.yml@refs/pull/12/merge", "fix/Crash on start",
+			[]string{"repo-app", "pr-12", "branch-fix-crash-on-start", "wf-ci"}},
+		{"example-org/app/.github/workflows/ci.yml@refs/pull/12/merge", "", []string{"repo-app", "pr-12", "wf-ci"}},
+		{"example-org/app/.github/workflows/release.yml@refs/tags/v1.2", "", []string{"repo-app", "tag-v1.2", "wf-release"}},
+		// A reusable workflow from another repository names its own ref and file, not the job's.
+		{"example-org/shared/.github/workflows/build.yml@refs/heads/main", "main", []string{"repo-app"}},
+		{"", "", []string{"repo-app"}},
 	}
 	for _, c := range cases {
-		if got := JobTags(job(c.ref)); !slices.Equal(got, c.want) {
+		if got := JobTags(job(c.ref), c.head); !slices.Equal(got, c.want) {
 			t.Errorf("%q: got %v, want %v", c.ref, got, c.want)
 		}
+	}
+
+	j := scaleset.Job{RepositoryName: "app", JobDisplayName: "  Unit (2, 4) / Linux ", WorkflowRunID: 1234567890}
+	if got, want := JobTags(j, ""), []string{"repo-app", "job-unit-2-4-linux", "run-1234567890"}; !slices.Equal(got, want) {
+		t.Errorf("job and run: got %v, want %v", got, want)
+	}
+	// Long names are cut, never leaving a trailing '-'; a name of only symbols gives no tag.
+	j = scaleset.Job{RepositoryName: "app", JobDisplayName: strings.Repeat("a", 39) + " b c"}
+	if got := JobTags(j, ""); !slices.Equal(got, []string{"repo-app", "job-" + strings.Repeat("a", 39)}) {
+		t.Errorf("long job name: got %v", got)
+	}
+	j = scaleset.Job{RepositoryName: "app", JobDisplayName: "(✓)"}
+	if got := JobTags(j, ""); !slices.Equal(got, []string{"repo-app"}) {
+		t.Errorf("symbol job name: got %v", got)
 	}
 }
 
@@ -387,23 +407,52 @@ func TestJobTags(t *testing.T) {
 // notes; a persistent runner's next job replaces them.
 func TestStartedJobLabelsRunner(t *testing.T) {
 	h := newHarness(t, pve.Guest{VMID: 9003, Type: "lxc", Name: "gh-pve1-small-9003", Node: "pve1", Status: "running",
-		RawTags: "gh-runner;owner-example-org;repo-old;pr-7"})
+		RawTags: "gh-runner;owner-example-org;repo-old;pr-7;wf-old;job-old;run-1;runnerid-41"})
+	var asked []string
+	h.l.WorkflowRun = func(_ context.Context, owner, repo string, id int64) (github.Run, error) {
+		asked = append(asked, fmt.Sprintf("%s/%s/%d", owner, repo, id))
+		return github.Run{HeadBranch: "feature/login", Number: 17}, nil
+	}
 	stop := h.start(t)
 	h.svc.Push(0, scalesettest.Job{Type: "JobStarted", RepositoryName: "app", OwnerName: "example-org",
 		RunnerName: "gh-pve1-small-9003", JobDisplayName: "unit (2, 4)",
+		JobWorkflowRef: "example-org/app/.github/workflows/ci.yml@refs/pull/12/merge", WorkflowRunID: 42})
+	eventually(t, "message ack", func() bool { return h.svc.Pending() == 0 })
+	stop()
+	if !slices.Equal(asked, []string{"example-org/app/42"}) {
+		t.Errorf("runs read: %v", asked)
+	}
+	g, _ := h.pve.Guest(9003)
+	tags := "gh-runner;owner-example-org;runnerid-41;repo-app;pr-12;branch-feature-login;wf-ci;job-unit-2-4;run-42"
+	if g.RawTags != tags {
+		t.Errorf("tags %q, want %q", g.RawTags, tags)
+	}
+	want := "pct set 9003 --tags " + tags + " --description " +
+		"GitHub Actions runner managed by pve-runners\n\nRunning example-org/app, job \"unit (2, 4)\"\n" +
+		"Workflow: example-org/app/.github/workflows/ci.yml@refs/pull/12/merge\n" +
+		"Branch: feature/login\n" +
+		"Run #17: https://github.com/example-org/app/actions/runs/42"
+	if !slices.Contains(h.pve.Mutations(), want) {
+		t.Errorf("no labelling call in %q", h.pve.Mutations())
+	}
+}
+
+// Without the run (the REST call failed), the job is still labelled from its message.
+func TestStartedJobLabelsRunnerWithoutRun(t *testing.T) {
+	h := newHarness(t, pve.Guest{VMID: 9003, Type: "lxc", Name: "gh-pve1-small-9003", Node: "pve1", Status: "running",
+		RawTags: "gh-runner;owner-example-org"})
+	h.l.WorkflowRun = func(context.Context, string, string, int64) (github.Run, error) {
+		return github.Run{}, errors.New("boom")
+	}
+	stop := h.start(t)
+	h.svc.Push(0, scalesettest.Job{Type: "JobStarted", RepositoryName: "app", OwnerName: "example-org",
+		RunnerName: "gh-pve1-small-9003", JobDisplayName: "lint",
 		JobWorkflowRef: "example-org/app/.github/workflows/ci.yml@refs/heads/develop", WorkflowRunID: 42})
 	eventually(t, "message ack", func() bool { return h.svc.Pending() == 0 })
 	stop()
 	g, _ := h.pve.Guest(9003)
-	if want := "gh-runner;owner-example-org;repo-app;branch-develop"; g.RawTags != want {
+	if want := "gh-runner;owner-example-org;repo-app;branch-develop;wf-ci;job-lint;run-42"; g.RawTags != want {
 		t.Errorf("tags %q, want %q", g.RawTags, want)
-	}
-	want := "pct set 9003 --tags gh-runner;owner-example-org;repo-app;branch-develop --description " +
-		"GitHub Actions runner managed by pve-runners\n\nRunning example-org/app, job \"unit (2, 4)\"\n" +
-		"Workflow: example-org/app/.github/workflows/ci.yml@refs/heads/develop\n" +
-		"Run: https://github.com/example-org/app/actions/runs/42"
-	if !slices.Contains(h.pve.Mutations(), want) {
-		t.Errorf("no labelling call in %q", h.pve.Mutations())
 	}
 }
 

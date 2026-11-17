@@ -296,6 +296,19 @@ func (c *Client) RepoPrivate(ctx context.Context, inst int64, owner, repo string
 	return out.Private || out.Visibility == "internal", nil
 }
 
+// Run is the part of a workflow run the runner labels show.
+type Run struct {
+	HeadBranch string `json:"head_branch"`
+	Number     int64  `json:"run_number"`
+}
+
+// WorkflowRun reads one workflow run (actions: read).
+func (c *Client) WorkflowRun(ctx context.Context, inst int64, owner, repo string, id int64) (Run, error) {
+	var out Run
+	path := "/repos/" + url.PathEscape(owner) + "/" + url.PathEscape(repo) + "/actions/runs/" + strconv.FormatInt(id, 10)
+	return out, c.asInstallation(ctx, inst, http.MethodGet, path, nil, &out)
+}
+
 // QueuedJob is a workflow job GitHub has queued and no runner has picked up yet.
 type QueuedJob struct {
 	ID        int64     `json:"id"`

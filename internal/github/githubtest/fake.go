@@ -167,6 +167,16 @@ func (f *Fake) serve(w http.ResponseWriter, r *http.Request) {
 		}
 		var id int64
 		fmt.Sscan(parts[6], &id)
+		if len(parts) == 7 {
+			for _, run := range f.Runs[parts[2]+"/"+parts[3]] {
+				if fmt.Sprint(run["id"]) == parts[6] {
+					write(w, 200, run)
+					return
+				}
+			}
+			write(w, 404, map[string]string{"message": "Not Found"})
+			return
+		}
 		write(w, 200, map[string]any{"jobs": f.RunJobs[id]})
 	case r.Method == "GET" && strings.HasPrefix(path, "/repos/") && strings.Count(path, "/") == 3:
 		name := strings.TrimPrefix(path, "/repos/")

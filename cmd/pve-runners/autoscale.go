@@ -48,7 +48,10 @@ func listeners(cfg *config.Config, prov *provision.Provisioner, n *notify.Notifi
 						return gh.RepoPrivate(ctx, t.InstallationID, owner, r)
 					},
 					Failed:     func(ctx context.Context, msg string) { n.Send(ctx, notify.SpawnFailed, msg) },
-					StartGrace: cfg.Autoscale.StartGrace, Queued: queuedJobs(gh, t, repo)}
+					StartGrace: cfg.Autoscale.StartGrace, Queued: queuedJobs(gh, t, repo),
+					WorkflowRun: func(ctx context.Context, owner, r string, id int64) (github.Run, error) {
+						return gh.WorkflowRun(ctx, t.InstallationID, owner, r, id)
+					}}
 				l.Group = func(ctx context.Context) (int64, error) {
 					if repo != "" {
 						private, err := gh.RepoPrivate(ctx, t.InstallationID, t.User, repo)
