@@ -417,3 +417,87 @@ func TestPruneUnlocksAnUnconvertedTemplateBeforeDestroying(t *testing.T) {
 		t.Fatalf("got %q, want %q", m, want)
 	}
 }
+
+func TestEnsurePreloadsDockerImagesIntoTheTemplate(t *testing.T) {
+	f := newFixture(t)
+	f.publish("template-ubuntu-latest-20261008-2", "ubuntu-latest", now-100000, false)
+	f.m.DockerImages = []string{"postgres:16", "nginx:alpine"}
+	f.m.Nameservers = []string{"192.0.2.53"}
+	id, err := f.m.Ensure(context.Background(), ParseRef("ubuntu-latest"))
+	if err != nil || id != 8900 {
+		t.Fatalf("ensure: %d %v", id, err)
+	}
+	tag := DockerTag([]string{"nginx:alpine", "postgres:16"})
+	m := f.pve.Mutations()
+	if len(m) != 7 || !strings.HasSuffix(strings.SplitN(m[0], " --description", 2)[0], ";created-1790000000;"+tag) {
+		t.Fatalf("create: %q", m)
+	}
+	want := []string{
+		"pct set 8900 --nameserver 192.0.2.53",
+		"pct start 8900",
+		"pct exec 8900 -- sh -c " + preloadScript + " preload postgres:16 nginx:alpine",
+		"pct exec 8900 -- sh -c " + sealScript,
+		"pct stop 8900",
+		"pct template 8900",
+	}
+	if !reflect.DeepEqual(m[1:], want) {
+		t.Fatalf("commands\n got %q\nwant %q", m[1:], want)
+	}
+
+	// The same list in another order is the same template.
+	f.m.DockerImages = []string{"nginx:alpine", "postgres:16"}
+	if id, err := f.m.Ensure(context.Background(), ParseRef("ubuntu-latest")); err != nil || id != 8900 {
+		t.Fatalf("same list: %d %v", id, err)
+	}
+	// A changed list makes a new template of the same release, and Prune drops the old one.
+	f.m.DockerImages = []string{"postgres:16"}
+	if id, err := f.m.Ensure(context.Background(), ParseRef("ubuntu-latest")); err != nil || id != 8901 {
+		t.Fatalf("changed list: %d %v", id, err)
+	}
+	f.pve.Guests[1].RawTags = strings.Replace(f.pve.Guests[1].RawTags, "created-1790000000", "created-1790000001", 1)
+	removed, err := f.m.Prune(context.Background(), []Ref{ParseRef("ubuntu-latest")}, nil)
+	if err != nil || len(removed) != 1 || !strings.HasPrefix(removed[0].What, "template 8900 ") {
+		t.Fatalf("prune: %+v %v", removed, err)
+	}
+}
+
+func TestFailedDockerPreloadStillMakesTheTemplate(t *testing.T) {
+	f := newFixture(t)
+	f.publish("template-ubuntu-latest-20261008-2", "ubuntu-latest", now-100000, false)
+	f.m.DockerImages = []string{"postgres:16"}
+	f.pve.FailOn["pct exec 8900 -- sh -c i=0"] = fmt.Errorf("exit status 1")
+	id, err := f.m.Ensure(context.Background(), ParseRef("ubuntu-latest"))
+	if err != nil || id != 8900 {
+		t.Fatalf("ensure: %d %v", id, err)
+	}
+	m := f.pve.Mutations()
+	if got := m[len(m)-3:]; !reflect.DeepEqual(got, []string{"pct exec 8900 -- sh -c " + sealScript, "pct stop 8900", "pct template 8900"}) {
+		t.Fatalf("after the failed pull: %q", got)
+	}
+	// Tagged with the list anyway, so the next spawn doesn't build it again.
+	if id, err := f.m.Ensure(context.Background(), ParseRef("ubuntu-latest")); err != nil || id != 8900 {
+		t.Fatalf("second ensure: %d %v", id, err)
+	}
+}
+
+func TestEnsureDoesNotWaitForATemplateBeingMade(t *testing.T) {
+	f := newFixture(t, pve.Guest{VMID: 8900, Type: "lxc", Template: 1,
+		RawTags: "gh-template;image-ubuntu-latest;rel-ubuntu-latest-20261001-1;store-local-lvm;created-1789000000"})
+	f.publish("template-ubuntu-latest-20261008-2", "ubuntu-latest", now-100000, false)
+	syncMu.Lock() // another Ensure is creating the new release's template
+	defer syncMu.Unlock()
+	id, err := f.m.Ensure(context.Background(), ParseRef("ubuntu-latest"))
+	if err != nil || id != 8900 {
+		t.Fatalf("ensure: %d %v", id, err)
+	}
+}
+
+func TestDockerTag(t *testing.T) {
+	if DockerTag(nil) != "" {
+		t.Fatal("no images must give no tag")
+	}
+	a, b := DockerTag([]string{"a:1", "b:2"}), DockerTag([]string{"b:2", "a:1", "a:1"})
+	if a != b || len(a) != len("docker-")+8 {
+		t.Fatalf("%q %q", a, b)
+	}
+}

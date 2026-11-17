@@ -225,6 +225,10 @@ type Images struct {
 	RootfsGB int `yaml:"rootfs_gb"`
 	// CheckInterval is how often the service looks for newer images and prunes old ones.
 	CheckInterval time.Duration `yaml:"check_interval"`
+	// DockerImages are pulled into each new template, so runners (linked clones) start with them and
+	// jobs don't download them. Kept in the host's config rather than the published images, which
+	// stay generic; changing the list makes a new template.
+	DockerImages []string `yaml:"docker_images,omitempty"`
 }
 
 type Update struct {
@@ -492,6 +496,8 @@ var (
 	// Linux interface names: at most 15 characters.
 	bridgeRe = regexp.MustCompile(`^[A-Za-z0-9_.-]{1,15}$`)
 	imageRe  = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]*(@template-[a-z0-9._-]+)?$`)
+	// Docker references (registry/name:tag or @sha256:digest); it is passed to docker pull as one argument.
+	dockerRefRe = regexp.MustCompile(`^[a-z0-9][a-z0-9._/:-]*(:[A-Za-z0-9_][A-Za-z0-9._-]{0,127})?(@sha256:[a-f0-9]{64})?$`)
 )
 
 // Validate returns every problem at once so `config validate` can show them together.
@@ -556,6 +562,11 @@ func (c *Config) Validate() error {
 	}
 	if c.Images.RetentionDays < 1 {
 		add("images.retention_days must be at least 1, got %d", c.Images.RetentionDays)
+	}
+	for i, ref := range c.Images.DockerImages {
+		if !dockerRefRe.MatchString(ref) {
+			add("images.docker_images[%d] %q is not an image reference such as postgres:16", i, ref)
+		}
 	}
 	ilo, ihi := c.Images.VMIDRange[0], c.Images.VMIDRange[1]
 	if ilo < 100 || ihi < ilo {

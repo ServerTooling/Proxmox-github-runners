@@ -74,6 +74,10 @@ type Manager struct {
 	Pool         string // Proxmox resource pool
 	Bridge       string
 	RootfsGB     int
+	// DockerImages are pulled into each new template (images.docker_images); Nameservers are the DNS
+	// servers it uses for that (network.dns).
+	DockerImages []string
+	Nameservers  []string
 	Retention    time.Duration
 	Now          func() time.Time
 	// StateDir keeps the ID of a template being created, so a create cut off by a restart (which leaves
@@ -277,6 +281,30 @@ func onStorage(tpls []pve.Guest, storage string) []pve.Guest {
 	return out
 }
 
+// DockerTag records which docker_images a template was made with: a short hash of the sorted list,
+// or "" for none (templates made before the setting existed have no tag either).
+func DockerTag(refs []string) string {
+	if len(refs) == 0 {
+		return ""
+	}
+	sorted := slices.Clone(refs)
+	slices.Sort(sorted)
+	sum := sha256.Sum256([]byte(strings.Join(slices.Compact(sorted), "\n")))
+	return "docker-" + hex.EncodeToString(sum[:4])
+}
+
+// withDocker keeps the templates made with this docker_images list.
+func withDocker(tpls []pve.Guest, refs []string) []pve.Guest {
+	want := strings.TrimPrefix(DockerTag(refs), "docker-")
+	var out []pve.Guest
+	for _, g := range tpls {
+		if g.TagValue("docker") == want {
+			out = append(out, g)
+		}
+	}
+	return out
+}
+
 func newestTemplate(tpls []pve.Guest, name, release string) *pve.Guest {
 	var best *pve.Guest
 	for i := range tpls {
@@ -295,7 +323,16 @@ func newestTemplate(tpls []pve.Guest, name, release string) *pve.Guest {
 // when needed. If GitHub can't be reached, an unpinned ref falls back to the newest local template
 // so runners keep working offline.
 func (m *Manager) Ensure(ctx context.Context, ref Ref) (int, error) {
-	syncMu.Lock()
+	if !syncMu.TryLock() {
+		// Another call is downloading or creating a template, which can take minutes (docker_images
+		// pulls). A spawn shouldn't wait for it while a finished template of this image is there.
+		if tpls, err := m.Host.Templates(ctx, m.Range); err == nil {
+			if g := newestTemplate(onStorage(tpls, m.Storage), ref.Name, ref.Release); g != nil {
+				return g.VMID, nil
+			}
+		}
+		syncMu.Lock()
+	}
 	defer syncMu.Unlock()
 	tpls, err := m.Host.Templates(ctx, m.Range)
 	if err != nil {
@@ -309,8 +346,9 @@ func (m *Manager) Ensure(ctx context.Context, ref Ref) (int, error) {
 		return 0, err
 	}
 	// Runners are linked clones, which Proxmox keeps on the template's own storage, so after
-	// proxmox.storage changes the image gets a fresh template there (from the cached archive).
-	if g := newestTemplate(onStorage(tpls, m.Storage), ref.Name, rel.Tag); g != nil {
+	// proxmox.storage changes the image gets a fresh template there (from the cached archive). A
+	// changed docker_images list also makes a new one; Prune then drops the old one as a duplicate.
+	if g := newestTemplate(withDocker(onStorage(tpls, m.Storage), m.DockerImages), ref.Name, rel.Tag); g != nil {
 		return g.VMID, nil
 	}
 	archive, err := m.Fetch(ctx, rel, ref.Name)
@@ -339,6 +377,9 @@ func (m *Manager) create(ctx context.Context, name, release, file string) (id in
 			"created-" + strconv.FormatInt(m.now().Unix(), 10)},
 		Description: "Runner template " + release + " managed by pve-runners",
 	}
+	if t := DockerTag(m.DockerImages); t != "" {
+		spec.Tags = append(spec.Tags, t)
+	}
 	if err := m.Host.EnsurePool(ctx, m.Pool); err != nil {
 		return 0, err
 	}
@@ -357,12 +398,63 @@ func (m *Manager) create(ctx context.Context, name, release, file string) (id in
 	if err := m.clearCreating(); err != nil {
 		return 0, err
 	}
+	if len(m.DockerImages) > 0 {
+		// A failed pull still leaves a working template: jobs then pull what is missing themselves,
+		// which beats stopping every runner while a registry is down. The next release tries again.
+		if err := m.preloadDocker(ctx, id); err != nil {
+			slog.Warn("docker images not preloaded into the template; jobs will pull them", "template", id, "err", err)
+		}
+	}
 	if err := m.Host.Exec(ctx, pve.LXCTemplate(id)); err != nil {
 		cctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 		defer cancel()
 		return 0, errors.Join(err, m.Host.DestroyTemplate(cctx, id, m.Range))
 	}
 	return id, nil
+}
+
+// preloadTimeout bounds pulling docker_images into a new template.
+var preloadTimeout = 20 * time.Minute
+
+// preloadScript waits for the guest's network and Docker, then pulls every image given as an argument.
+// It tries them all and fails if any failed, so one bad name doesn't cost the others.
+const preloadScript = `i=0
+until ip -4 route show default | grep -q . && systemctl is-active -q docker; do
+  i=$((i+1)); [ "$i" -ge 120 ] && { echo "no network or docker after 120 s" >&2; exit 1; }; sleep 1
+done
+rc=0
+for ref in "$@"; do docker pull -q "$ref" || rc=1; done
+exit $rc`
+
+// sealScript readies the guest to be cloned again: Docker's files flushed, and no machine ID or journal
+// that every clone would share (the runner image ships with an empty machine ID for the same reason).
+const sealScript = `systemctl stop docker.socket docker containerd 2>/dev/null
+rm -rf /var/log/journal/*
+truncate -s 0 /etc/machine-id
+sync`
+
+// preloadDocker starts the new container, pulls DockerImages into it and stops it again, so every
+// linked clone has them on disk for free. Only these fixed commands run in it, never a job.
+func (m *Manager) preloadDocker(ctx context.Context, id int) error {
+	if len(m.Nameservers) > 0 {
+		if err := m.Host.Exec(ctx, pve.LXCNameservers(id, m.Nameservers)); err != nil {
+			return err
+		}
+	}
+	if err := m.Host.Exec(ctx, pve.LXCStart(id)); err != nil {
+		return err
+	}
+	pctx, cancel := context.WithTimeout(ctx, preloadTimeout)
+	pullErr := m.Host.Exec(pctx, pve.LXCExec(id, append([]string{"sh", "-c", preloadScript, "preload"}, m.DockerImages...)...))
+	cancel()
+	// Sealed and stopped whatever the pulls did: the template must not keep a running guest's state.
+	sctx, scancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer scancel()
+	sealErr := m.Host.Exec(sctx, pve.LXCExec(id, "sh", "-c", sealScript))
+	if err := m.Host.Exec(sctx, pve.LXCStop(id)); err != nil {
+		return errors.Join(pullErr, sealErr, err)
+	}
+	return errors.Join(pullErr, sealErr)
 }
 
 func (m *Manager) creatingFile() string { return filepath.Join(m.StateDir, "template-creating") }

@@ -149,6 +149,11 @@ func EmptyDirCmd(path string) Cmd {
 
 func LXCStart(id int) Cmd { return Cmd{"pct", []string{"start", strconv.Itoa(id)}} }
 
+// LXCNameservers sets a guest's DNS servers, leaving the rest of its config alone.
+func LXCNameservers(id int, servers []string) Cmd {
+	return Cmd{"pct", []string{"set", strconv.Itoa(id), "--nameserver", strings.Join(servers, " ")}}
+}
+
 func LXCStop(id int) Cmd { return Cmd{"pct", []string{"stop", strconv.Itoa(id)}} }
 
 // LXCDestroy also purges the guest from pools/backup jobs so nothing dangles.
