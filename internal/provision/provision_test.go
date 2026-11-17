@@ -460,13 +460,17 @@ func TestDrainWaitsForTheRunningSpawnAndStopsNewOnes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if Busy() {
+		t.Fatal("Drain returned before the running spawn finished")
+	}
+	// Spawn has returned (Busy is false), but its goroutine may not have sent the result yet.
 	select {
 	case err := <-spawned:
 		if err != nil {
 			t.Fatalf("the running spawn should finish: %v", err)
 		}
-	default:
-		t.Fatal("Drain returned before the running spawn finished")
+	case <-time.After(5 * time.Second):
+		t.Fatal("the running spawn did not return")
 	}
 	if _, err := p.Spawn(context.Background(), Request{Pool: "small", Target: org, JIT: jit}); !errors.Is(err, ErrDraining) {
 		t.Fatalf("want ErrDraining while drained, got %v", err)
