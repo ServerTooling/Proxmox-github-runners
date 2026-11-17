@@ -246,7 +246,12 @@ func (f *Fake) pct(args []string) error {
 		f.find(args[1]).Status = "running"
 	case "stop":
 		f.find(args[1]).Status = "stopped"
+	case "unlock":
+		f.find(args[1]).Lock = ""
 	case "destroy":
+		if g := f.find(args[1]); g != nil && g.Lock != "" {
+			return fmt.Errorf("CT %s is locked (%s)", args[1], g.Lock)
+		}
 		n, _ := strconv.Atoi(args[1])
 		for i, g := range f.Guests {
 			if g.VMID == n {
