@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"slices"
 	"strconv"
 	"strings"
@@ -84,10 +85,13 @@ type Listener struct {
 	privMu  sync.Mutex
 	private map[string]privEntry
 
-	// Runner states, touched only by the listener's own goroutine, except state, which concurrent
-	// spawns also write through step (under stepMu) while that goroutine waits for them.
+	// Runner states, touched only by the listener's own goroutine, except what spawns running beside it
+	// also write: state (through step), starting, spawning and lastFail, all under stepMu.
 	stepMu     sync.Mutex
-	state      map[int]string  // vmid -> last logged state
+	state      map[int]string // vmid -> last logged state
+	starting   map[int]bool   // vmid -> its spawn is still running
+	spawning   int            // spawns still running, with or without a vmid yet
+	spawns     sync.WaitGroup
 	registered map[int]bool    // vmid -> its runner has connected to GitHub (never goes back)
 	busy       map[string]bool // runner name -> has a job (JobStarted until JobCompleted)
 	// failedToRegister counts runners destroyed for not registering within StartGrace.
@@ -162,6 +166,13 @@ func ScaleSetTag(id int64) string { return "scaleset-" + strconv.FormatInt(id, 1
 // Run serves the scale set until ctx ends or the session fails; the caller restarts it with backoff.
 func (l *Listener) Run(ctx context.Context) error {
 	defer l.labels.Wait()
+	defer func() {
+		// A renewed session or a restart after an error keeps the spawns in flight (they count as
+		// provisioning runners); only shutdown waits for them.
+		if ctx.Err() != nil {
+			l.spawns.Wait()
+		}
+	}()
 	err := l.run(ctx)
 	for errors.Is(err, errRenewSession) && ctx.Err() == nil {
 		err = l.run(ctx)
@@ -485,6 +496,8 @@ func (l *Listener) setBusy(runner string, busy bool) {
 
 // setState logs a runner's state when it changes.
 func (l *Listener) setState(vmid int, runner, state string, attrs ...any) {
+	l.stepMu.Lock()
+	defer l.stepMu.Unlock()
 	if l.state == nil {
 		l.state = map[int]string{}
 	}
@@ -506,10 +519,10 @@ func (l *Listener) step(vmid int, step string) {
 	l.log().Info("runner state", "listener", l.Name(), "vmid", vmid, "state", StateProvisioning, "step", step)
 }
 
-// survey reads this scale set's runners and puts each in its state. A stopped one has finished
-// (scale waits for its spawns, so none of ours is mid-start while this runs) and waits for
-// reconcile to destroy it. A running one that hasn't registered within the start grace is destroyed
-// here, so the caller's count goes down and it starts a replacement while the jobs are still there.
+// survey reads this scale set's runners and puts each in its state. A runner whose spawn is still
+// running counts as provisioning, also before its guest exists. Any other stopped one has finished
+// and waits for reconcile to destroy it. A running one that hasn't registered within the start grace
+// is destroyed here, so the caller's count goes down and it starts a replacement while the jobs are still there.
 func (l *Listener) survey(ctx context.Context) (fleet, error) {
 	var f fleet
 	runners, err := l.Host.Runners(ctx)
@@ -520,12 +533,19 @@ func (l *Listener) survey(ctx context.Context) (fleet, error) {
 	if l.registered == nil {
 		l.registered = map[int]bool{}
 	}
+	l.stepMu.Lock()
+	starting, spawning := maps.Clone(l.starting), l.spawning
+	l.stepMu.Unlock()
+	f.live, f.provisioning = spawning, spawning
 	seen, names := map[int]bool{}, map[string]bool{}
 	for _, g := range runners {
 		if !g.HasTag(tag) || !g.HasTag(owner) {
 			continue
 		}
 		seen[g.VMID], names[g.Name] = true, true
+		if starting[g.VMID] {
+			continue // counted in spawning
+		}
 		if g.Status != "running" {
 			l.setState(g.VMID, g.Name, StateDone)
 			continue
@@ -585,12 +605,14 @@ func (l *Listener) survey(ctx context.Context) (fleet, error) {
 			delete(l.busy, name)
 		}
 	}
+	l.stepMu.Lock()
 	for id := range l.state {
-		if !seen[id] {
+		if !seen[id] && !l.starting[id] {
 			delete(l.state, id)
 			delete(l.registered, id)
 		}
 	}
+	l.stepMu.Unlock()
 	slices.SortFunc(f.spare, func(a, b pve.Guest) int { return cmp.Compare(createdAt(b), createdAt(a)) })
 	return f, nil
 }
@@ -713,26 +735,54 @@ func (l *Listener) scale(ctx context.Context, sess *scaleset.Session, stats scal
 		return
 	}
 	// All at once: the provisioner takes them one clone at a time, and each one's start and boot
-	// overlap the next one's clone. This goroutine waits for all of them, so survey never sees one
-	// of ours mid-start.
-	type spawned struct {
-		res *provision.Result
-		err error
+	// overlap the next one's clone. They run beside the message loop: a listener that stops polling
+	// while a clone runs loses the jobs offered meanwhile (GitHub never assigns them again), and
+	// survey counts them as provisioning until they return.
+	for range want - have {
+		l.spawn(ctx, want, have)
 	}
-	out := make([]spawned, want-have)
-	var wg sync.WaitGroup
-	for i := range out {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			out[i].res, out[i].err = l.Prov.Spawn(ctx, provision.Request{Pool: l.PoolName, Target: l.Target, Repo: l.Repo,
-				JIT: l.jit, Tags: []string{ScaleSetTag(l.scaleSetID)},
-				Step: l.step})
-		}()
+}
+
+// spawn starts one runner in the background.
+func (l *Listener) spawn(ctx context.Context, want, have int) {
+	l.stepMu.Lock()
+	l.spawning++
+	if l.starting == nil {
+		l.starting = map[int]bool{}
 	}
-	wg.Wait()
-	for _, o := range out {
-		switch err := o.err; {
+	l.stepMu.Unlock()
+	l.spawns.Add(1)
+	// run sets scaleSetID again when it renews the session, which can happen while this spawn runs.
+	setID := l.scaleSetID
+	go func() {
+		defer l.spawns.Done()
+		vmid := 0
+		res, err := l.Prov.Spawn(ctx, provision.Request{Pool: l.PoolName, Target: l.Target, Repo: l.Repo,
+			JIT:  func(ctx context.Context, name string) (*github.JITConfig, error) { return l.jit(ctx, setID, name) },
+			Tags: []string{ScaleSetTag(setID)},
+			Step: func(id int, s string) {
+				if vmid == 0 {
+					vmid = id
+					l.stepMu.Lock()
+					l.starting[id] = true
+					l.stepMu.Unlock()
+				}
+				l.step(id, s)
+			}})
+		l.stepMu.Lock()
+		l.spawning--
+		delete(l.starting, vmid)
+		notify := false
+		switch {
+		case errors.Is(err, provision.ErrAtCapacity), errors.Is(err, provision.ErrDraining), err != nil && ctx.Err() != nil:
+		case err != nil:
+			notify = err.Error() != l.lastFail
+			l.lastFail = err.Error()
+		default:
+			l.lastFail = ""
+		}
+		l.stepMu.Unlock()
+		switch {
 		case errors.Is(err, provision.ErrAtCapacity):
 			// The host or pool is full; GitHub keeps the job queued until a runner frees up.
 			l.log().Info("at capacity", "listener", l.Name(), "want", want, "have", have, "reason", err)
@@ -740,19 +790,16 @@ func (l *Listener) scale(ctx context.Context, sess *scaleset.Session, stats scal
 			// the service restarts for an update and spawns again after
 		case err != nil:
 			if ctx.Err() != nil {
-				continue
+				return
 			}
 			l.log().Error("spawn failed", "listener", l.Name(), "err", err)
-			if msg := err.Error(); msg != l.lastFail && l.Failed != nil {
-				l.Failed(ctx, l.Name()+": "+msg)
+			if notify && l.Failed != nil {
+				l.Failed(ctx, l.Name()+": "+err.Error())
 			}
-			l.lastFail = err.Error()
 		default:
-			l.lastFail = ""
-			have++
-			l.log().Info("runner started", "listener", l.Name(), "vmid", o.res.VMID, "runner", o.res.RunnerName)
+			l.log().Info("runner started", "listener", l.Name(), "vmid", res.VMID, "runner", res.RunnerName)
 		}
-	}
+	}()
 }
 
 // logState writes the reconcile line and the gauges Grafana reads (one line per reconcile).
@@ -790,8 +837,8 @@ func (l *Listener) trim(ctx context.Context, spare []pve.Guest, n int) {
 	}
 }
 
-func (l *Listener) jit(ctx context.Context, name string) (*github.JITConfig, error) {
-	j, err := l.Service.GenerateJIT(ctx, l.scaleSetID, name, "_work")
+func (l *Listener) jit(ctx context.Context, scaleSetID int64, name string) (*github.JITConfig, error) {
+	j, err := l.Service.GenerateJIT(ctx, scaleSetID, name, "_work")
 	if err != nil {
 		return nil, err
 	}

@@ -426,3 +426,36 @@ func TestClaimsJobsWaitingFromBeforeTheSession(t *testing.T) {
 		t.Errorf("acquirablejobs calls = %+v", calls)
 	}
 }
+
+// On 2026-11-17 a runner start hung for minutes while the listener waited for it, and GitHub never
+// assigned the jobs it offered meanwhile. Messages must keep being read and claimed during a spawn,
+// and the spawn still running must count as a runner, so no second one is started for the same job.
+func TestMessagesAreReadWhileARunnerStarts(t *testing.T) {
+	h := newHarness(t)
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	free := func() { releaseOnce.Do(func() { close(release) }) }
+	var once sync.Once
+	cloning := make(chan struct{})
+	h.pve.Before = func(line string) {
+		if strings.HasPrefix(line, "pct clone") {
+			once.Do(func() { close(cloning); <-release })
+		}
+	}
+	h.start(t)
+	t.Cleanup(free) // runs before the listener's stop, so a failure here can't hang it
+	eventually(t, "session", func() bool { return h.svc.Sessions() == 1 })
+	h.svc.Push(1, scalesettest.Job{Type: "JobAvailable", RunnerRequestID: 1, RepositoryName: "app", OwnerName: "example-org"})
+	<-cloning
+
+	h.svc.Push(2, scalesettest.Job{Type: "JobAvailable", RunnerRequestID: 2, RepositoryName: "app", OwnerName: "example-org"})
+	eventually(t, "second job claimed while the clone hangs", func() bool { return len(h.svc.Acquired()) == 2 })
+	eventually(t, "messages acknowledged", func() bool { return h.svc.Pending() == 0 })
+
+	free()
+	eventually(t, "two runners", func() bool { return len(h.runners(t)) == 2 })
+	time.Sleep(100 * time.Millisecond)
+	if n := len(h.svc.JITNames()); n != 2 {
+		t.Fatalf("%d runners registered for 2 jobs", n)
+	}
+}
