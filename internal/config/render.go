@@ -225,6 +225,12 @@ images:
   rootfs_gb: {{.Images.RootfsGB}}
   # How often to look for newer images and prune old ones.
   check_interval: {{dur .Images.CheckInterval}}
+  # Docker images pulled into each new template, e.g. [postgres:16, nginx:alpine], so runners start
+  # with them and jobs don't download them. Changing the list makes a new template.
+  docker_images:{{if not .Images.DockerImages}} []{{end}}
+{{- range .Images.DockerImages}}
+    - {{q .}}
+{{- end}}
 
 notify:
   # Alerts on failed spawns, updates and image downloads. Off until a file holding an ntfy,

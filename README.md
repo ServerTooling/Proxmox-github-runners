@@ -107,6 +107,10 @@ Two pool settings cut the wait before a job's first step. Every job still gets a
   (`cache: false`) in workflows that run here: the shared folder already holds what they would restore,
   and their restore unpacks an archive over files that jobs running beside it have open, which has
   crashed Go builds with `SIGBUS`.
+- `images.docker_images: [postgres:16, nginx:alpine]` pulls those Docker images into each template
+  the host makes, so every runner (a linked clone) starts with them on disk and jobs don't download
+  them. The list stays in your host's config; the published images don't change. Changing it makes a
+  new template. If a pull fails, the template is made anyway and jobs pull what is missing.
 
 ## Settings in the app
 

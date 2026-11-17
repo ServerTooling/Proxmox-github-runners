@@ -466,6 +466,7 @@ func imageManager(ctx context.Context, cfg *config.Config) (*images.Manager, err
 		PublicKey: buildinfo.UpdatePublicKey, GOARCH: runtime.GOARCH, Host: h, Range: cfg.Images.VMIDRange,
 		CacheDir: filepath.Dir(probe), CacheStorage: cfg.Images.CacheStorage, Storage: cfg.Proxmox.Storage,
 		Pool: cfg.Proxmox.Pool, Bridge: cfg.Proxmox.Bridge, RootfsGB: cfg.Images.RootfsGB,
+		DockerImages: cfg.Images.DockerImages, Nameservers: cfg.Network.DNS,
 		Retention: time.Duration(cfg.Images.RetentionDays) * 24 * time.Hour, Now: time.Now}, nil
 }
 

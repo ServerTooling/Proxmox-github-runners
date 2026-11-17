@@ -1,0 +1,19 @@
+# Azure CLI from Microsoft's apt repository, as on GitHub's ubuntu-latest (azure/login and `az` steps).
+# apt checks the packages against Microsoft's signing key.
+- name: Microsoft apt key
+  ansible.builtin.get_url:
+    url: https://packages.microsoft.com/keys/microsoft.asc
+    dest: /etc/apt/keyrings/microsoft.asc
+    mode: "0644"
+
+- name: Azure CLI apt repo
+  ansible.builtin.copy:
+    dest: /etc/apt/sources.list.d/azure-cli.list
+    content: "deb [arch={{ arch }} signed-by=/etc/apt/keyrings/microsoft.asc] https://packages.microsoft.com/repos/azure-cli/ {{ ansible_distribution_release }} main\n"
+    mode: "0644"
+
+- name: Install Azure CLI
+  ansible.builtin.apt:
+    name: azure-cli
+    update_cache: true
+    install_recommends: false
