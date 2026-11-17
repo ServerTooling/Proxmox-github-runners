@@ -213,9 +213,12 @@ func TestPruneKeepsNewestPinnedAndInUse(t *testing.T) {
 		g(8902, 1, fmt.Sprintf("gh-template;store-local-lvm;image-ubuntu-latest;rel-ubuntu-latest-20260301-3;created-%d", now-50*day)), // pinned
 		g(8903, 1, fmt.Sprintf("gh-template;store-local-lvm;image-ubuntu-latest;rel-ubuntu-latest-20261001-4;created-%d", now-5*day)),  // recent
 		g(8904, 1, fmt.Sprintf("gh-template;store-local-lvm;image-other;rel-other-20250101-1;created-%d", now-400*day)),                // newest of its name
-		g(8905, 0, fmt.Sprintf("gh-template;store-local-lvm;image-ubuntu-latest;rel-ubuntu-latest-20261009-5;created-%d", now)),        // never finished
-		g(8000, 1, fmt.Sprintf("gh-template;store-local-lvm;image-ubuntu-latest;created-%d", now-900*day)),                             // outside range
+		g(8905, 0, fmt.Sprintf("gh-template;store-local-lvm;image-ubuntu-latest;rel-ubuntu-latest-20261009-5;created-%d", now-3600)),   // never finished
+		// Just converted, but /cluster/resources still shows it as a container: not "incomplete" yet.
+		g(8906, 0, fmt.Sprintf("gh-template;store-local-lvm;image-ubuntu-latest;rel-ubuntu-latest-20261009-6;created-%d", now-5)),
+		g(8000, 1, fmt.Sprintf("gh-template;store-local-lvm;image-ubuntu-latest;created-%d", now-900*day)), // outside range
 	)
+	f.m.Range = [2]int{8900, 8906}
 	old := time.Unix(now-90*day, 0)
 	for _, rel := range []string{"20260101-1", "20260301-3", "20261001-4"} {
 		p := filepath.Join(f.m.CacheDir, "pve-runners-template-ubuntu-latest-"+rel+"-amd64.tar.zst")

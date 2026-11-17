@@ -346,6 +346,9 @@ func (m *Manager) create(ctx context.Context, name, release, file string) (id in
 	return id, nil
 }
 
+// incompleteGrace is how long an unconverted template is left alone by Prune.
+const incompleteGrace = 10 * time.Minute
+
 // Removed is one thing Prune deleted.
 type Removed struct {
 	What   string // "template <id>" or the archive file name
@@ -404,7 +407,12 @@ func (m *Manager) Prune(ctx context.Context, refs []Ref, inUse []int) ([]Removed
 	keptRels := map[string]bool{}
 	sort.Slice(tpls, func(i, j int) bool { return tpls[i].VMID < tpls[j].VMID })
 	for _, g := range tpls {
-		// A template whose creation was interrupted (never converted) is always cleaned up.
+		// A template whose creation was interrupted (never converted) is always cleaned up, once it is
+		// past incompleteGrace: /cluster/resources lags a few seconds behind pct template, so a template
+		// made just before this prune can still look unconverted (on 2026-11-17 one was destroyed that way).
+		if g.Template != 1 && created(g) > m.now().Add(-incompleteGrace).Unix() {
+			continue
+		}
 		moved := g.TagValue("store") != m.Storage
 		if keep[g.VMID] || (g.Template == 1 && created(g) > cutoff && !moved && !dup[g.VMID]) {
 			keptRels[g.TagValue("rel")] = true
