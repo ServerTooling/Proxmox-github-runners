@@ -138,6 +138,10 @@ func hostFields() []section {
 			number("images.rootfs_gb", "Template disk (GB)", "", func(c *config.Config) *int { return &c.Images.RootfsGB }),
 			duration("images.check_interval", "Check for new images every", "",
 				func(c *config.Config) *time.Duration { return &c.Images.CheckInterval }),
+			strList("images.docker_images", "Docker images in templates",
+				"Comma-separated, such as postgres:16, nginx:alpine. Pulled into each new template so jobs "+
+					"don't download them; changing the list makes a new template.",
+				func(c *config.Config) *[]string { return &c.Images.DockerImages }),
 		}},
 		{"Updates", []field{
 			boolean("update.enabled", "Self-update", "", func(c *config.Config) *bool { return &c.Update.Enabled }),

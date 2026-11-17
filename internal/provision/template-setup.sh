@@ -13,6 +13,11 @@ rm -f /tmp/actions-runner.tar.gz
 chown -R runner:runner /opt/actions-runner
 /opt/actions-runner/bin/installdependencies.sh
 chmod 700 /etc/gh-runner
+# Passwordless sudo, as on GitHub's hosted runners: setup steps such as `playwright install --with-deps`
+# run apt-get. Root here is root of a throwaway unprivileged container; its firewall is set on the host.
+mkdir -p /etc/sudoers.d
+printf 'runner ALL=(ALL) NOPASSWD:ALL\n' > /etc/sudoers.d/runner
+chmod 0440 /etc/sudoers.d/runner
 
 cat > /etc/systemd/system/gh-runner.service <<'UNIT'
 [Unit]

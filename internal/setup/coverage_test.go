@@ -100,6 +100,7 @@ var changed = map[string]string{
 	"network.blocked":            "192.0.2.0/24, 198.51.100.0/24",
 	"network.allow":              "udp/53@192.0.2.1, tcp/443",
 	"network.dns":                "192.0.2.53",
+	"images.docker_images":       "postgres:16, nginx:alpine",
 	"cache.dir":                  "/srv/runner-cache",
 	"cache.max_gb":               "20",
 	"images.retention_days":      "7",

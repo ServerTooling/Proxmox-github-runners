@@ -7,7 +7,7 @@ template container from it.
 
 | Image | Base | Tools |
 | --- | --- | --- |
-| `ubuntu-latest` | Ubuntu 24.04 (follows GitHub's `ubuntu-latest`) | Python 3 + pip/venv/pipx, Go, Node.js LTS + npm/corepack, Helm, kubectl, Docker Engine + Buildx/Compose, git, gh, jq, build-essential |
+| `ubuntu-latest` | Ubuntu 24.04 (follows GitHub's `ubuntu-latest`) | Python 3 + pip/venv/pipx, Go, Node.js LTS + npm/corepack, Helm, kubectl, Docker Engine + Buildx/Compose, Azure CLI, Playwright's browser libraries, git, gh, jq, build-essential; passwordless sudo for `runner` |
 
 ## How a build works
 
