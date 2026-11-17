@@ -466,7 +466,7 @@ func imageManager(ctx context.Context, cfg *config.Config) (*images.Manager, err
 		PublicKey: buildinfo.UpdatePublicKey, GOARCH: runtime.GOARCH, Host: h, Range: cfg.Images.VMIDRange,
 		CacheDir: filepath.Dir(probe), CacheStorage: cfg.Images.CacheStorage, Storage: cfg.Proxmox.Storage,
 		Pool: cfg.Proxmox.Pool, Bridge: cfg.Proxmox.Bridge, RootfsGB: cfg.Images.RootfsGB,
-		Retention: time.Duration(cfg.Images.RetentionDays) * 24 * time.Hour, Now: time.Now}, nil
+		Retention: time.Duration(cfg.Images.RetentionDays) * 24 * time.Hour, Now: time.Now, StateDir: stateDir}, nil
 }
 
 // imageRefs lists the distinct images the pools use, in a stable order.

@@ -190,6 +190,8 @@ func LXCFeatures(id int) Cmd {
 
 func LXCTemplate(id int) Cmd { return Cmd{"pct", []string{"template", strconv.Itoa(id)}} }
 
+func LXCUnlock(id int) Cmd { return Cmd{"pct", []string{"unlock", strconv.Itoa(id)}} }
+
 // ListGuests reads every guest in the cluster; pvesh is local and needs no credentials as root.
 func ListGuestsCmd() Cmd {
 	return Cmd{"pvesh", []string{"get", "/cluster/resources", "--type", "vm", "--output-format", "json"}}
@@ -209,6 +211,8 @@ type Guest struct {
 	Template int    `json:"template"`
 	Pool     string `json:"pool"`
 	RawTags  string `json:"tags"`
+	// Lock is the config lock ("create", "backup", ...) a task holds; empty when unlocked.
+	Lock string `json:"lock"`
 
 	// Usage as pvestatd last sampled it: CPU is the share of MaxCPU cores in use; the byte counters
 	// for network and disk I/O count up from the guest's start.
@@ -573,6 +577,43 @@ func (h *Host) DestroyTemplate(ctx context.Context, id int, rng [2]int) error {
 		}
 		if !OwnedTemplate(g, rng) {
 			return fmt.Errorf("%w: %d (%s)", ErrNotOwned, id, g.Name)
+		}
+		// A template whose conversion was cut off keeps the lock of that task, and Proxmox refuses to
+		// destroy a locked guest; nothing else of ours runs on an unconverted template.
+		if g.Template != 1 && g.Lock != "" {
+			if err := h.Exec(ctx, LXCUnlock(id)); err != nil {
+				return err
+			}
+		}
+		return h.Exec(ctx, LXCDestroy(id))
+	}
+	return nil
+}
+
+// InterruptedCreate is how a container looks after `pct create` was killed before it wrote the config:
+// only the create lock, no tags or template flag. It is not proof of ownership on its own: callers
+// must also know they started that create.
+func InterruptedCreate(g Guest, rng [2]int) bool {
+	return g.Type == "lxc" && g.VMID >= rng[0] && g.VMID <= rng[1] && g.Lock == "create" && g.RawTags == "" && g.Template != 1
+}
+
+// DestroyInterruptedCreate removes the half-made container of a `pct create` this tool started (the
+// caller recorded the ID before running it). A missing guest is fine; one that no longer looks like
+// an interrupted create (it finished, or the ID was reused) is refused.
+func (h *Host) DestroyInterruptedCreate(ctx context.Context, id int, rng [2]int) error {
+	gs, err := h.Guests(ctx)
+	if err != nil {
+		return err
+	}
+	for _, g := range gs {
+		if g.VMID != id {
+			continue
+		}
+		if !InterruptedCreate(g, rng) {
+			return fmt.Errorf("%w: %d (%s) is not an interrupted create", ErrNotOwned, id, g.Name)
+		}
+		if err := h.Exec(ctx, LXCUnlock(id)); err != nil {
+			return err
 		}
 		return h.Exec(ctx, LXCDestroy(id))
 	}

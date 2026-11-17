@@ -9,6 +9,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -77,7 +78,7 @@ func newFixture(t *testing.T, guests ...pve.Guest) *fixture {
 		PublicKey: base64.StdEncoding.EncodeToString(der), GOARCH: "amd64",
 		Host: &pve.Host{R: f.pve, Node: "pve1", VMIDRange: [2]int{9000, 9010}}, Range: [2]int{8900, 8905},
 		CacheDir: t.TempDir(), CacheStorage: "local", Storage: "local-lvm", Pool: "gh-runners", Bridge: "vmbr0",
-		RootfsGB: 16, Retention: 30 * 24 * time.Hour, Now: func() time.Time { return time.Unix(now, 0) }}
+		RootfsGB: 16, Retention: 30 * 24 * time.Hour, Now: func() time.Time { return time.Unix(now, 0) }, StateDir: t.TempDir()}
 	return f
 }
 
@@ -337,5 +338,82 @@ func TestInUse(t *testing.T) {
 	got := InUse([]pve.Guest{{RawTags: "gh-runner;from-8901"}, {RawTags: "gh-runner"}})
 	if !reflect.DeepEqual(got, []int{8901}) {
 		t.Fatalf("%v", got)
+	}
+}
+
+// interrupted is what pct create leaves when it is killed before writing the config.
+func interrupted(id int) pve.Guest {
+	return pve.Guest{VMID: id, Type: "lxc", Status: "stopped", Lock: "create"}
+}
+
+func TestFailedCreateRemovesItsLockedContainer(t *testing.T) {
+	f := newFixture(t)
+	f.publish("template-ubuntu-latest-20261008-2", "ubuntu-latest", now-100000, false)
+	f.pve.FailOn["pct create 8900"] = errors.New("extracting archive failed")
+	f.pve.Before = func(line string) {
+		if strings.HasPrefix(line, "pct create 8900 ") {
+			f.pve.Guests = append(f.pve.Guests, interrupted(8900))
+		}
+	}
+	if _, err := f.m.Ensure(context.Background(), ParseRef("ubuntu-latest")); err == nil {
+		t.Fatal("ensure succeeded")
+	}
+	m := f.pve.Mutations()
+	if want := []string{"pct unlock 8900", "pct destroy 8900 --purge 1 --force 1"}; len(m) != 3 || !reflect.DeepEqual(m[1:], want) {
+		t.Fatalf("got %q, want the create then %q", m, want)
+	}
+	if _, err := os.Stat(f.m.creatingFile()); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("mark left behind: %v", err)
+	}
+}
+
+func TestPruneRemovesACreateCutOffByARestart(t *testing.T) {
+	// 8901 looks the same but this tool never recorded creating it, so it stays.
+	f := newFixture(t, interrupted(8900), interrupted(8901))
+	if err := os.WriteFile(f.m.creatingFile(), []byte("8900\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.m.Prune(context.Background(), nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if m, want := f.pve.Mutations(), []string{"pct unlock 8900", "pct destroy 8900 --purge 1 --force 1"}; !reflect.DeepEqual(m, want) {
+		t.Fatalf("got %q, want %q", m, want)
+	}
+	if _, ok := f.pve.Guest(8901); !ok {
+		t.Fatal("8901 was removed")
+	}
+	if _, err := os.Stat(f.m.creatingFile()); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("mark left behind: %v", err)
+	}
+}
+
+func TestRecordedCreateThatFinishedIsLeftToPrune(t *testing.T) {
+	// The create finished (tags written) but the service stopped before clearing the mark.
+	g := pve.Guest{VMID: 8900, Type: "lxc", Template: 1,
+		RawTags: fmt.Sprintf("gh-template;image-ubuntu-latest;rel-ubuntu-latest-20261008-2;store-local-lvm;created-%d", now-60)}
+	f := newFixture(t, g)
+	if err := os.WriteFile(f.m.creatingFile(), []byte("8900\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.m.Prune(context.Background(), nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if m := f.pve.Mutations(); len(m) != 0 {
+		t.Fatalf("finished template touched: %q", m)
+	}
+	if _, err := os.Stat(f.m.creatingFile()); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("mark left behind: %v", err)
+	}
+}
+
+func TestPruneUnlocksAnUnconvertedTemplateBeforeDestroying(t *testing.T) {
+	g := pve.Guest{VMID: 8900, Type: "lxc", Lock: "create",
+		RawTags: fmt.Sprintf("gh-template;image-ubuntu-latest;rel-ubuntu-latest-20261008-2;store-local-lvm;created-%d", now-3600)}
+	f := newFixture(t, g)
+	if _, err := f.m.Prune(context.Background(), nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if m, want := f.pve.Mutations(), []string{"pct unlock 8900", "pct destroy 8900 --purge 1 --force 1"}; !reflect.DeepEqual(m, want) {
+		t.Fatalf("got %q, want %q", m, want)
 	}
 }

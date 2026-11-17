@@ -14,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -75,6 +76,9 @@ type Manager struct {
 	RootfsGB     int
 	Retention    time.Duration
 	Now          func() time.Time
+	// StateDir keeps the ID of a template being created, so a create cut off by a restart (which leaves
+	// a locked container with no tags) can be recognized as ours and removed. Empty disables it.
+	StateDir string
 }
 
 // syncMu allows one image download or template creation at a time across every Manager: the image
@@ -317,6 +321,9 @@ func (m *Manager) Ensure(ctx context.Context, ref Ref) (int, error) {
 }
 
 func (m *Manager) create(ctx context.Context, name, release, file string) (id int, err error) {
+	if err := m.cleanInterrupted(ctx); err != nil {
+		slog.Warn("removing an interrupted template create", "err", err)
+	}
 	id, err = m.Host.NextFreeIDIn(ctx, m.Range)
 	if err != nil {
 		return 0, err
@@ -335,7 +342,19 @@ func (m *Manager) create(ctx context.Context, name, release, file string) (id in
 	if err := m.Host.EnsurePool(ctx, m.Pool); err != nil {
 		return 0, err
 	}
+	if err := m.markCreating(id); err != nil {
+		return 0, err
+	}
 	if err := m.Host.Exec(ctx, pve.LXCCreate(id, spec)); err != nil {
+		// pct leaves a locked, untagged container behind when it fails or is killed. After a plain
+		// failure it is done, so remove the container now. When shutdown cut it off, its task may still
+		// be finishing: the mark stays and the next create or prune (after the restart) removes it.
+		if ctx.Err() != nil {
+			return 0, err
+		}
+		return 0, errors.Join(err, m.cleanInterrupted(ctx))
+	}
+	if err := m.clearCreating(); err != nil {
 		return 0, err
 	}
 	if err := m.Host.Exec(ctx, pve.LXCTemplate(id)); err != nil {
@@ -344,6 +363,57 @@ func (m *Manager) create(ctx context.Context, name, release, file string) (id in
 		return 0, errors.Join(err, m.Host.DestroyTemplate(cctx, id, m.Range))
 	}
 	return id, nil
+}
+
+func (m *Manager) creatingFile() string { return filepath.Join(m.StateDir, "template-creating") }
+
+// markCreating records the ID about to be passed to pct create.
+func (m *Manager) markCreating(id int) error {
+	if m.StateDir == "" {
+		return nil
+	}
+	if err := os.MkdirAll(m.StateDir, 0o700); err != nil {
+		return err
+	}
+	return os.WriteFile(m.creatingFile(), []byte(strconv.Itoa(id)+"\n"), 0o600)
+}
+
+func (m *Manager) clearCreating() error {
+	if m.StateDir == "" {
+		return nil
+	}
+	if err := os.Remove(m.creatingFile()); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return nil
+}
+
+// cleanInterrupted removes the container of a recorded create that never finished, then the record.
+// A guest that finished creating (it has tags) is left to Prune's usual rules.
+func (m *Manager) cleanInterrupted(ctx context.Context) error {
+	if m.StateDir == "" {
+		return nil
+	}
+	data, err := os.ReadFile(m.creatingFile())
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	id, err := strconv.Atoi(strings.TrimSpace(string(data)))
+	if err != nil {
+		return errors.Join(fmt.Errorf("%s: %w", m.creatingFile(), err), m.clearCreating())
+	}
+	switch err := m.Host.DestroyInterruptedCreate(ctx, id, m.Range); {
+	case errors.Is(err, pve.ErrNotOwned):
+		// It finished after all, or the ID belongs to something else now: not ours to remove.
+	case err != nil:
+		return fmt.Errorf("interrupted create of %d: %w", id, err)
+	default:
+		slog.Info("cleaned up an interrupted template create", "template", id)
+	}
+	return m.clearCreating()
 }
 
 // incompleteGrace is how long an unconverted template is left alone by Prune.
@@ -362,9 +432,10 @@ type Removed struct {
 func (m *Manager) Prune(ctx context.Context, refs []Ref, inUse []int) ([]Removed, error) {
 	syncMu.Lock()
 	defer syncMu.Unlock()
+	cleanErr := m.cleanInterrupted(ctx)
 	tpls, err := m.Host.Templates(ctx, m.Range)
 	if err != nil {
-		return nil, err
+		return nil, errors.Join(cleanErr, err)
 	}
 	cutoff := m.now().Add(-m.Retention).Unix()
 	keep := map[int]bool{}
@@ -403,7 +474,7 @@ func (m *Manager) Prune(ctx context.Context, refs []Ref, inUse []int) ([]Removed
 		}
 	}
 	var removed []Removed
-	var errs []error
+	errs := []error{cleanErr}
 	keptRels := map[string]bool{}
 	sort.Slice(tpls, func(i, j int) bool { return tpls[i].VMID < tpls[j].VMID })
 	for _, g := range tpls {
