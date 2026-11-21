@@ -128,6 +128,15 @@ func hostFields() []section {
 			number("cache.max_gb", "Max size per org (GB)", "A bigger folder is emptied once none of its runners are running.",
 				func(c *config.Config) *int { return &c.Cache.MaxGB }),
 		}},
+		{"Docker machine", []field{
+			text("docker.ssh", "SSH login", "user@host of a machine with Docker and Sysbox (a NAS) for pools of type docker. "+
+				"Empty: none. Then run \"Set up Docker machine\".", func(c *config.Config) *string { return &c.Docker.SSH }),
+			number("docker.port", "SSH port", "", func(c *config.Config) *int { return &c.Docker.Port }),
+			number("docker.max_runners", "Max runners", "Most runner containers at once there, across docker pools.",
+				func(c *config.Config) *int { return &c.Docker.MaxRunners }),
+			idRange("docker.id_range", "Runner IDs", "Numbers runner containers; must not overlap the guest ID ranges.",
+				func(c *config.Config) *[2]int { return &c.Docker.IDRange }),
+		}},
 		{"Images", []field{
 			number("images.retention_days", "Keep images (days)", "The newest, pinned and in-use images are always kept.",
 				func(c *config.Config) *int { return &c.Images.RetentionDays }),
@@ -204,7 +213,10 @@ func poolFields() []poolField {
 	mode := str("mode", "Mode", func(p *config.Pool) *string { return &p.Mode })
 	// Permanent runners are planned; config validation refuses them until then, so the page does not offer them.
 	mode.Kind, mode.Options = "select", []string{"ephemeral"}
+	typ := str("type", "Runs on", func(p *config.Pool) *string { return &p.Type })
+	typ.Kind, typ.Options = "select", []string{"lxc", "docker"}
 	return []poolField{
+		typ,
 		str("image", "Image (empty to use a template ID)", func(p *config.Pool) *string { return &p.Image }),
 		num("template", "Template ID (when no image)", func(p *config.Pool) *int { return &p.Template }),
 		mode,
