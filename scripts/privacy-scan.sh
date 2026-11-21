@@ -20,9 +20,10 @@ PATTERNS=(
   'github_pat_[A-Za-z0-9_]{40,}'
   '-----BEGIN [A-Z ]*PRIVATE KEY-----'
 )
-# Inside binaries, random byte runs like "H@oa.nF" look like emails; real addresses there have a
-# lowercase domain and a local part of two or more characters, so binaries use this stricter form.
-BINARY_EMAIL='\b[A-Za-z0-9][A-Za-z0-9._%+-]+@[a-z0-9][a-z0-9-]+(\.[a-z0-9-]+)*\.[a-z]{2,24}\b'
+# Inside binaries, random byte runs like "H@oa.nF" or "09@bj.yl" look like emails; real addresses
+# there have a lowercase domain, a local part of two or more characters, and either a TLD of three or
+# more letters or a domain name of three or more before a two-letter one (web.de, not bj.yl).
+BINARY_EMAIL='\b[A-Za-z0-9][A-Za-z0-9._%+-]+@([a-z0-9][a-z0-9-]*\.)*([a-z0-9][a-z0-9-]*\.[a-z]{3,24}|[a-z0-9][a-z0-9-]{2,}\.[a-z]{2})\b'
 # Emails that are fine to publish.
 EMAIL_OK='(noreply@anthropic\.com|noreply@github\.com|@example\.(com|org|net)|@users\.noreply\.github\.com)'
 
