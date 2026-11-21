@@ -45,7 +45,7 @@ func Plan(cfg *config.Config, runners []pve.Guest, now time.Time) []Action {
 }
 
 // Once runs a single reconcile pass and returns what it destroyed.
-func Once(ctx context.Context, cfg *config.Config, h *pve.Host, now time.Time) ([]Action, error) {
+func Once(ctx context.Context, cfg *config.Config, h pve.RunnerHost, now time.Time) ([]Action, error) {
 	runners, err := h.Runners(ctx)
 	if err != nil {
 		return nil, err
@@ -68,7 +68,7 @@ func Once(ctx context.Context, cfg *config.Config, h *pve.Host, now time.Time) (
 // off: the unit stops the guest when the runner exits, but a guest that was started again (by hand,
 // or by a host restart) just sits there with nothing to run. Guests whose state can't be read are
 // left alone; the next pass tries again.
-func deadRunners(ctx context.Context, h *pve.Host, runners []pve.Guest, planned []Action, now time.Time) []Action {
+func deadRunners(ctx context.Context, h pve.RunnerHost, runners []pve.Guest, planned []Action, now time.Time) []Action {
 	skip := map[int]bool{}
 	for _, a := range planned {
 		skip[a.VMID] = true

@@ -15,7 +15,8 @@ var notOnThePage = map[string]string{
 	"version":                    "written by config migration",
 	"notify.webhook_url_file":    "the page takes the URL itself and writes the file",
 	"logs.token_file":            "the page takes the token itself and writes the file",
-	"pools.*.type":               "only lxc pools exist so far",
+	"docker.key_file":            "made by \"Set up Docker machine\" at its default path",
+	"docker.known_hosts":         "pinned by \"Set up Docker machine\" at its default path",
 	"targets.*.app_slug":         "comes from the GitHub App",
 	"targets.*.org":              "targets are added by connecting a GitHub App",
 	"targets.*.user":             "targets are added by connecting a GitHub App",
@@ -102,6 +103,10 @@ var changed = map[string]string{
 	"network.dns":                "192.0.2.53",
 	"images.docker_images":       "postgres:16, nginx:alpine",
 	"cache.dir":                  "/srv/runner-cache",
+	"docker.ssh":                 "runner@192.0.2.20",
+	"docker.port":                "2222",
+	"docker.max_runners":         "3",
+	"docker.id_range":            "9700-9799",
 	"cache.max_gb":               "20",
 	"images.retention_days":      "7",
 	"images.repo":                "example-org/images",
@@ -124,6 +129,7 @@ var changed = map[string]string{
 }
 
 var changedPool = map[string]string{
+	"type":         "lxc", // docker needs an image and no bridge; config.TestDockerPools covers it
 	"image":        "",
 	"template":     "9100",
 	"mode":         "ephemeral",

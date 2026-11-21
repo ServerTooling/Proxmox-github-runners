@@ -40,6 +40,11 @@ SKIP_ROLES=go,helm templates/build.sh ubuntu-latest /tmp/out    # local image bu
 - `templates/`: image definitions (`<name>/template.yaml`) and Ansible roles; `templates/build.sh`
   builds one in Docker and `.github/workflows/templates.yml` publishes it. Every tarball a role
   downloads is checksum-verified against its publisher's sums.
+- `internal/docker`: runners as Sysbox containers on a second machine (a NAS) driven over SSH; every docker
+  command has a builder and a test asserting its argv against `dockertest.Fake`. Containers show up as
+  `pve.Guest`s (ID from `docker.id_range`, tags in a label), so reconcile and the autoscaler use them through
+  `pve.RunnerHost`. `Host.Owned` (ID in range AND `gh-runner` tag) guards removal; LAN isolation is a mangle
+  table rule set applied before every spawn, and spawning refuses when it fails.
 - `internal/cache`: the shared per-owner cache folders of pools with `cache: true` (sizes, trimming to
   `cache.max_gb`, clearing); only folders with no running runner of that owner are emptied.
 - `internal/logship`: optional log shipping to Grafana Loki (the service journal plus `gh-runner` in each

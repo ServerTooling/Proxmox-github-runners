@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/ServerTooling/proxmox-github-runners/internal/config"
+	"github.com/ServerTooling/proxmox-github-runners/internal/docker"
 	"github.com/ServerTooling/proxmox-github-runners/internal/github"
 	"github.com/ServerTooling/proxmox-github-runners/internal/pve"
 )
@@ -76,6 +77,10 @@ type Provisioner struct {
 	Templates func(ctx context.Context, image string) (int, error)
 	Now       func() time.Time
 	TmpDir    string
+	// Docker is the machine docker pools run on (docker.ssh), and DockerImage returns the local tag
+	// of a published image there, importing it first if needed.
+	Docker      *docker.Host
+	DockerImage func(ctx context.Context, image string) (string, error)
 	// NoLinkedClones is set when proxmox.storage can't hold linked clones (a directory or thick LVM
 	// storage), so every pool full-clones there.
 	NoLinkedClones bool
@@ -85,6 +90,8 @@ type Provisioner struct {
 	// template for the whole clone anyway, so clones of one template can't overlap; the rest of a spawn
 	// (start, boot, runner service) runs outside it, alongside the next spawn's clone.
 	mu sync.Mutex
+	// dmu does the same for docker spawns, which share no capacity, IDs or lock with Proxmox guests.
+	dmu sync.Mutex
 }
 
 // Proxmox tags allow only [a-z0-9_+.-], so owner names are lowercased and anything else dropped.
@@ -171,6 +178,9 @@ var cloneTimeout = 15 * time.Minute
 func (p *Provisioner) Spawn(ctx context.Context, req Request) (res *Result, err error) {
 	inFlight.Add(1)
 	defer inFlight.Add(-1)
+	if pool, ok := p.Cfg.Pools[req.Pool]; ok && pool.Type == "docker" {
+		return p.spawnDocker(ctx, req, pool)
+	}
 	p.mu.Lock()
 	locked := true
 	defer func() {
@@ -189,10 +199,10 @@ func (p *Provisioner) Spawn(ctx context.Context, req Request) (res *Result, err 
 		return nil, fmt.Errorf("unknown pool %q", req.Pool)
 	}
 	if pool.Type != "lxc" {
-		return nil, fmt.Errorf("pool %q is type %s; only lxc pools are supported so far", req.Pool, pool.Type)
+		return nil, fmt.Errorf("pool %q is type %s; only lxc and docker pools are supported so far", req.Pool, pool.Type)
 	}
-	if req.Target.User != "" && req.Repo == "" {
-		return nil, fmt.Errorf("%s is a personal account; pass a repo (personal accounts only have repo-level runners)", req.Target.User)
+	if err := checkRepo(req); err != nil {
+		return nil, err
 	}
 
 	runners, err := p.Host.Runners(ctx)
@@ -247,11 +257,7 @@ func (p *Provisioner) Spawn(ctx context.Context, req Request) (res *Result, err 
 	if err != nil {
 		return nil, err
 	}
-	// The host ID keeps runner names unique when several Proxmox hosts serve the same org.
-	name := fmt.Sprintf("gh-%s-%s-%d", tagSafe(p.Cfg.HostID), tagSafe(req.Pool), id)
-	if p.Cfg.HostID == "" {
-		name = fmt.Sprintf("gh-%s-%d", tagSafe(req.Pool), id)
-	}
+	name := p.runnerName(req.Pool, id)
 
 	t := req.Target
 	jit, err := p.jit(ctx, req, name, pool.Labels)
@@ -352,6 +358,22 @@ func (p *Provisioner) Spawn(ctx context.Context, req Request) (res *Result, err 
 	}
 	step("service started")
 	return &Result{VMID: id, Name: name, RunnerID: jit.Runner.ID, RunnerName: jit.Runner.Name}, nil
+}
+
+func checkRepo(req Request) error {
+	if req.Target.User != "" && req.Repo == "" {
+		return fmt.Errorf("%s is a personal account; pass a repo (personal accounts only have repo-level runners)", req.Target.User)
+	}
+	return nil
+}
+
+// runnerName is the guest's and the GitHub runner's name. The host ID keeps names unique when several
+// Proxmox hosts serve the same org.
+func (p *Provisioner) runnerName(pool string, id int) string {
+	if p.Cfg.HostID == "" {
+		return fmt.Sprintf("gh-%s-%d", tagSafe(pool), id)
+	}
+	return fmt.Sprintf("gh-%s-%s-%d", tagSafe(p.Cfg.HostID), tagSafe(pool), id)
 }
 
 // startRunner waits for the guest's systemd to finish booting first. Right after "pct start" systemd
