@@ -140,6 +140,13 @@ func (l *Listener) useKept(ctx context.Context, f fleet, stats scaleset.Statisti
 		}
 		rest = append(rest, g)
 	}
+	// One of its repo's guests is still being cleaned after its job (often the job before this one in
+	// the same workflow): it is armed as soon as it is kept, so no fresh runner starts for it.
+	for _, r := range f.keeping {
+		if n > 0 && repo != "" && r == repo {
+			n--
+		}
+	}
 	l.stepMu.Lock()
 	need := l.needRoom
 	l.stepMu.Unlock()
@@ -275,9 +282,9 @@ func (l *Listener) guest(ctx context.Context, name string) (pve.Guest, bool) {
 func (l *Listener) startKeep(ctx context.Context, j scaleset.Job) {
 	l.stepMu.Lock()
 	if l.keeping == nil {
-		l.keeping = map[string]bool{}
+		l.keeping = map[string]string{}
 	}
-	l.keeping[j.RunnerName] = true
+	l.keeping[j.RunnerName] = pve.ReuseTag(j.OwnerName, j.RepositoryName)
 	l.stepMu.Unlock()
 	l.labels.Add(1)
 	go func() {
@@ -285,7 +292,11 @@ func (l *Listener) startKeep(ctx context.Context, j scaleset.Job) {
 		defer func() {
 			l.stepMu.Lock()
 			delete(l.keeping, j.RunnerName)
+			wake := l.wakePoll
 			l.stepMu.Unlock()
+			if wake != nil {
+				wake()
+			}
 		}()
 		cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Minute)
 		defer cancel()

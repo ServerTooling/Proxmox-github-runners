@@ -110,15 +110,17 @@ type Listener struct {
 	lastReclaim    time.Time
 	renew          bool
 
-	// Reuse (pool.reuse_for, see reuse.go). pending are the jobs this listener acquired that no runner
-	// has started yet (request ID -> the repo's reuse tag); deferred are jobs of other repos it holds
-	// back while armedFor names the repo a kept container was started again for. arming (vmid -> reuse
-	// tag) and keeping (runner names whose guest is being cleaned after a job) are under stepMu.
+	// Reuse (pool.reuse_for, see reuse.go). pending are the jobs acquired by or assigned to this scale
+	// set that no runner has started yet (request ID -> the repo's reuse tag); deferred are jobs of
+	// other repos it holds back while armedFor names the repo a kept container was started again for.
+	// arming (vmid -> reuse tag), keeping (runner name -> reuse tag, while its guest is cleaned after a
+	// job) and wakePoll (ends the message poll in flight) are under stepMu.
 	pending  map[int64]pendingJob
 	deferred map[int64]string
 	armedFor string
 	arming   map[int]string
-	keeping  map[string]bool
+	keeping  map[string]string
+	wakePoll context.CancelFunc
 	needRoom bool
 	// tagMu serializes the read-change-write of a guest's tags (label, keep, rearm).
 	tagMu sync.Mutex
@@ -242,12 +244,23 @@ func (l *Listener) run(ctx context.Context) error {
 	l.scale(ctx, sess, stats)
 	var lastID int64
 	for {
-		msg, err := sess.GetMessage(ctx, lastID, l.capacity())
+		// A runner kept for reuse ends the poll, so a job of its repo that is already waiting gets it at once
+		// instead of after the long poll.
+		pctx, wake := context.WithCancel(ctx)
+		l.stepMu.Lock()
+		l.wakePoll = wake
+		l.stepMu.Unlock()
+		msg, err := sess.GetMessage(pctx, lastID, l.capacity())
+		woken := pctx.Err() != nil
+		wake()
 		if ctx.Err() != nil {
 			return nil
 		}
-		if err != nil {
+		if err != nil && !woken {
 			return fmt.Errorf("get message: %w", err)
+		}
+		if err != nil {
+			msg = nil
 		}
 		if msg != nil {
 			lastID = msg.ID
@@ -378,6 +391,9 @@ func (l *Listener) handle(ctx context.Context, sess *scaleset.Session, msg *scal
 			}
 		case "JobAssigned":
 			l.lastJob = l.now()
+			// GitHub assigns most jobs to the scale set itself, without a JobAvailable to acquire, so
+			// this is where reuse learns which repo the next runner is for.
+			l.addPending([]int64{j.RunnerRequestID}, map[int64]string{j.RunnerRequestID: pve.ReuseTag(j.OwnerName, j.RepositoryName)})
 		case "JobStarted":
 			l.lastJob = l.now()
 			delete(l.pending, j.RunnerRequestID)
@@ -513,6 +529,8 @@ type fleet struct {
 	// kept are guests waiting after a job for their repo's next one (pool.reuse_for), longest left first.
 	// They have no runner, so they are not live, but they hold a slot.
 	kept []pve.Guest
+	// keeping are the reuse tags of guests being cleaned to be kept; they hold a slot too.
+	keeping []string
 }
 
 func (l *Listener) setBusy(runner string, busy bool) {
@@ -601,8 +619,9 @@ func (l *Listener) survey(ctx context.Context) (fleet, error) {
 			f.busy++
 			continue
 		}
-		if keeping[g.Name] {
-			continue // its job just ended; it is being cleaned to be kept
+		if repo, ok := keeping[g.Name]; ok {
+			f.keeping = append(f.keeping, repo) // its job just ended; it is being cleaned to be kept
+			continue
 		}
 		if until := g.TagTime("kept"); !until.IsZero() {
 			if l.now().After(until) {
