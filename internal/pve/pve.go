@@ -287,16 +287,6 @@ func ParseGuests(data []byte) ([]Guest, error) {
 	return gs, nil
 }
 
-// RunnerHost is where runners live: a Proxmox Host, or the Docker machine of docker pools
-// (docker.Host). Reconcile and the autoscaler only need this much.
-type RunnerHost interface {
-	Runners(ctx context.Context) ([]Guest, error)
-	RunnerPhase(ctx context.Context, id int) (string, error)
-	RunnerUnitState(ctx context.Context, id int) (string, error)
-	Destroy(ctx context.Context, id int) error
-	Label(ctx context.Context, id int, tags []string, notes string) error
-}
-
 // Host wraps a Runner with the safety rules every mutation must pass.
 type Host struct {
 	R         Runner
@@ -457,17 +447,20 @@ func RunnerUnitStateCmd(id int) Cmd {
 // RunnerUnitState returns the runner unit's state (active, activating, inactive, failed, ...).
 // systemctl exits non-zero for every state but active, so the printed state wins over the error.
 func (h *Host) RunnerUnitState(ctx context.Context, id int) (string, error) {
-	return ParseUnitState(h.run(ctx, RunnerUnitStateCmd(id)))
+	out, err := h.run(ctx, RunnerUnitStateCmd(id))
+	if state := strings.TrimSpace(string(out)); state != "" {
+		return state, nil
+	}
+	return "", err
 }
 
 // RunnerPhaseCmd prints the runner's last journal line that says where it is: listening for jobs,
 // running one, or done with one. It reads the unit's journal, so it needs no GitHub permission.
 func RunnerPhaseCmd(id int) Cmd {
-	return LXCExec(id, "sh", "-c", PhaseScript)
+	return LXCExec(id, "sh", "-c", phaseScript)
 }
 
-// PhaseScript prints the runner unit's last journal line that tells its phase (ParsePhase).
-const PhaseScript = `journalctl -u gh-runner.service -o cat --no-pager | ` +
+const phaseScript = `journalctl -u gh-runner.service -o cat --no-pager | ` +
 	`grep -e 'Listening for Jobs' -e 'Running job' -e 'completed with result' | tail -n 1`
 
 // Runner phases RunnerPhase reports.
@@ -483,38 +476,19 @@ func (h *Host) RunnerPhase(ctx context.Context, id int) (string, error) {
 	if err != nil {
 		return PhaseStarting, err
 	}
-	return ParsePhase(out), nil
-}
-
-// ParsePhase reads PhaseScript's output.
-func ParsePhase(out []byte) string {
 	switch line := strings.TrimSpace(string(out)); {
 	case line == "":
-		return PhaseStarting
+		return PhaseStarting, nil
 	case strings.Contains(line, "Running job"):
-		return PhaseBusy
+		return PhaseBusy, nil
 	default:
-		return PhaseRegistered
+		return PhaseRegistered, nil
 	}
 }
 
-// RunnerUnitStateCmd's output: systemctl exits non-zero for every state but active, so the printed
-// state wins over the error.
-func ParseUnitState(out []byte, err error) (string, error) {
-	if state := strings.TrimSpace(string(out)); state != "" {
-		return state, nil
-	}
-	return "", err
-}
-
-// Label replaces a runner guest's tags and notes.
 // SetTags replaces a runner's tags.
 func (h *Host) SetTags(ctx context.Context, id int, tags []string) error {
 	return h.Exec(ctx, LXCTagsCmd(id, tags))
-}
-
-func (h *Host) Label(ctx context.Context, id int, tags []string, notes string) error {
-	return h.Exec(ctx, LXCLabelCmd(id, tags, notes))
 }
 
 // MemInfoCmd and ARCStatsCmd read the host's memory counters; the service runs on the node itself.

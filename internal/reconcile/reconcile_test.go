@@ -7,8 +7,6 @@ import (
 	"time"
 
 	"github.com/ServerTooling/proxmox-github-runners/internal/config"
-	"github.com/ServerTooling/proxmox-github-runners/internal/docker"
-	"github.com/ServerTooling/proxmox-github-runners/internal/docker/dockertest"
 	"github.com/ServerTooling/proxmox-github-runners/internal/pve"
 	"github.com/ServerTooling/proxmox-github-runners/internal/pve/pvetest"
 )
@@ -84,26 +82,6 @@ func TestOnceDestroysRunningGuestWhoseRunnerEnded(t *testing.T) {
 	}
 	if !reflect.DeepEqual(f.Mutations(), wantCmds) {
 		t.Fatalf("got %q", f.Mutations())
-	}
-}
-
-// Runner containers on the Docker machine go the same way: exited after their job, or stuck with a
-// dead runner unit.
-func TestOnceCleansUpDockerRunners(t *testing.T) {
-	d := dockertest.New()
-	d.Containers = []*dockertest.Container{
-		{ID: "9500", Name: "gh-done", State: "exited", Tags: "gh-runner;mode-ephemeral;created-1000"},
-		{ID: "9501", Name: "gh-busy", State: "running", Tags: "gh-runner;mode-ephemeral;created-1000"},
-		{ID: "9502", Name: "gh-dead", State: "running", Tags: "gh-runner;mode-ephemeral;created-1000"},
-	}
-	d.Output["gh-dead systemctl is-active"] = "failed\n"
-	cfg := config.Default()
-	done, err := Once(context.Background(), cfg, &docker.Host{R: d, IDRange: [2]int{9500, 9599}}, time.Unix(1000, 0).Add(time.Hour))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(done) != 2 || len(d.Containers) != 1 || d.Containers[0].Name != "gh-busy" {
-		t.Fatalf("done %+v, left %+v", done, d.Containers)
 	}
 }
 

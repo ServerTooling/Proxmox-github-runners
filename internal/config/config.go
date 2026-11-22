@@ -49,9 +49,10 @@ type Config struct {
 	// Autoscale listens to GitHub's job queue and starts a runner for each queued job.
 	Autoscale Autoscale `yaml:"autoscale"`
 	Cache     Cache     `yaml:"cache"`
-	// Docker is a second machine (a NAS, say) whose Docker runs the runners of pools with type docker.
-	Docker Docker         `yaml:"docker"`
-	Extra  map[string]any `yaml:",inline"`
+	// OldDocker reads the docker: section that builds with docker pools (removed) wrote into every
+	// config they saved, so those files still load; it is never written back.
+	OldDocker any            `yaml:"docker,omitempty"`
+	Extra     map[string]any `yaml:",inline"`
 }
 
 type Proxmox struct {
@@ -66,28 +67,6 @@ type Proxmox struct {
 	// Bridge is the network bridge runner NICs (and image templates) attach to; a pool can override it.
 	Bridge string `yaml:"bridge"`
 }
-
-// Docker is a machine with Docker and Sysbox that this host drives over SSH: each runner of a docker
-// pool is one Sysbox container there, created for a job and removed after it. Sysbox runs the image's
-// systemd and lets jobs use Docker inside their runner without privileges on the machine. The service stays on the Proxmox host, so
-// one config, one GitHub App per org and one settings screen cover both machines.
-type Docker struct {
-	// SSH is user@host of the Docker machine; empty means no docker pools. The user needs Docker
-	// access, which is root-equivalent there, so it should be a dedicated account.
-	SSH  string `yaml:"ssh"`
-	Port int    `yaml:"port"`
-	// KeyFile is this host's private key for SSH, KnownHosts the pinned host key of the machine.
-	KeyFile    string `yaml:"key_file"`
-	KnownHosts string `yaml:"known_hosts"`
-	// MaxRunners caps runner containers there across all docker pools.
-	MaxRunners int `yaml:"max_runners"`
-	// IDRange numbers the runner containers (as vmid_range does guests); it must not overlap either
-	// guest range, so a runner's ID names one runner on either machine.
-	IDRange [2]int `yaml:"id_range"`
-}
-
-// Enabled reports whether docker pools have a machine to run on.
-func (d Docker) Enabled() bool { return d.SSH != "" }
 
 type GitHub struct {
 	APIURL        string `yaml:"api_url"`
@@ -132,7 +111,7 @@ func (t Target) Owner() string {
 }
 
 type Pool struct {
-	Type     string   `yaml:"type"`               // lxc | docker | vm (vm arrives in a later phase)
+	Type     string   `yaml:"type"`               // lxc | vm (vm arrives in a later phase)
 	Template int      `yaml:"template,omitempty"` // a template container prepared by hand, or
 	Image    string   `yaml:"image,omitempty"`    // a published image: name, or name@release-tag to pin
 	Mode     string   `yaml:"mode"`               // ephemeral | permanent
@@ -291,11 +270,8 @@ func Default() *Config {
 		},
 		Autoscale: Autoscale{Enabled: true, StartGrace: 3 * time.Minute},
 		Cache:     Cache{Dir: "/var/lib/pve-runners/cache", MaxGB: 50},
-		Docker: Docker{Port: 22, KeyFile: filepath.Join(DefaultDir, "docker_ed25519"),
-			KnownHosts: filepath.Join(DefaultDir, "docker_known_hosts"), MaxRunners: 4,
-			IDRange: [2]int{9500, 9599}},
-		Logs: Logs{Interval: 15 * time.Second},
-		Web:  Web{Listen: ":8765"},
+		Logs:      Logs{Interval: 15 * time.Second},
+		Web:       Web{Listen: ":8765"},
 		Update: Update{
 			Enabled: true, Channel: "edge", Interval: 15 * time.Minute,
 			Repo: "ServerTooling/proxmox-github-runners",
@@ -402,21 +378,6 @@ func (c *Config) applyDefaults() {
 	if c.Cache.MaxGB == 0 {
 		c.Cache.MaxGB = d.Cache.MaxGB
 	}
-	if c.Docker.Port == 0 {
-		c.Docker.Port = d.Docker.Port
-	}
-	if c.Docker.KeyFile == "" {
-		c.Docker.KeyFile = d.Docker.KeyFile
-	}
-	if c.Docker.KnownHosts == "" {
-		c.Docker.KnownHosts = d.Docker.KnownHosts
-	}
-	if c.Docker.MaxRunners == 0 {
-		c.Docker.MaxRunners = d.Docker.MaxRunners
-	}
-	if c.Docker.IDRange == [2]int{} {
-		c.Docker.IDRange = d.Docker.IDRange
-	}
 	for i := range c.Targets {
 		if c.Targets[i].PrivateKeyFile == "" && c.Targets[i].Owner() != "" {
 			c.Targets[i].PrivateKeyFile = KeyPath(c.Targets[i].Owner())
@@ -444,15 +405,12 @@ func (c *Config) applyDefaults() {
 		}
 		if p.Max == 0 {
 			p.Max = c.Proxmox.MaxRunners
-			if p.Type == "docker" {
-				p.Max = c.Docker.MaxRunners
-			}
 		}
 		if p.Warm > 0 && p.WarmFor == 0 {
 			p.WarmFor = 30 * time.Minute
 		}
 		// Always attach a NIC with the firewall flag so isolation holds whatever the template had.
-		if p.Bridge == "" && p.Type != "docker" {
+		if p.Bridge == "" {
 			p.Bridge = c.Proxmox.Bridge
 		}
 	}
@@ -547,9 +505,7 @@ var (
 	labelRe = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
 	// Linux interface names: at most 15 characters.
 	bridgeRe = regexp.MustCompile(`^[A-Za-z0-9_.-]{1,15}$`)
-	// user@host for ssh; the user can't start with '-' and the host is a name or an IP.
-	sshTargetRe = regexp.MustCompile(`^[a-z_][a-z0-9_.-]*@[A-Za-z0-9][A-Za-z0-9.:-]*$`)
-	imageRe     = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]*(@template-[a-z0-9._-]+)?$`)
+	imageRe  = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]*(@template-[a-z0-9._-]+)?$`)
 	// Docker references (registry/name:tag or @sha256:digest); it is passed to docker pull as one argument.
 	dockerRefRe = regexp.MustCompile(`^[a-z0-9][a-z0-9._/:-]*(:[A-Za-z0-9_][A-Za-z0-9._-]{0,127})?(@sha256:[a-f0-9]{64})?$`)
 )
@@ -631,29 +587,6 @@ func (c *Config) Validate() error {
 	if c.Images.RootfsGB < 4 {
 		add("images.rootfs_gb must be at least 4, got %d", c.Images.RootfsGB)
 	}
-	if c.Docker.Enabled() {
-		dlo, dhi := c.Docker.IDRange[0], c.Docker.IDRange[1]
-		// A leading '-' would make ssh read the target as an option.
-		if !sshTargetRe.MatchString(c.Docker.SSH) {
-			add("docker.ssh %q must be user@host, such as runner@192.0.2.20", c.Docker.SSH)
-		}
-		if c.Docker.Port < 1 || c.Docker.Port > 65535 {
-			add("docker.port must be 1-65535, got %d", c.Docker.Port)
-		}
-		if !filepath.IsAbs(c.Docker.KeyFile) || !filepath.IsAbs(c.Docker.KnownHosts) {
-			add("docker.key_file and docker.known_hosts must be absolute paths")
-		}
-		switch {
-		case dlo < 100 || dhi < dlo:
-			add("docker.id_range must be [low, high] with 100 <= low <= high, got [%d, %d]", dlo, dhi)
-		case dlo <= hi && lo <= dhi:
-			add("docker.id_range [%d, %d] overlaps proxmox.vmid_range [%d, %d]", dlo, dhi, lo, hi)
-		case dlo <= ihi && ilo <= dhi:
-			add("docker.id_range [%d, %d] overlaps images.vmid_range [%d, %d]", dlo, dhi, ilo, ihi)
-		case c.Docker.MaxRunners < 1 || c.Docker.MaxRunners > dhi-dlo+1:
-			add("docker.max_runners must be between 1 and the size of id_range (%d), got %d", dhi-dlo+1, c.Docker.MaxRunners)
-		}
-	}
 	if c.Update.Channel != "edge" && c.Update.Channel != "stable" {
 		add("update.channel must be edge or stable, got %q", c.Update.Channel)
 	}
@@ -661,19 +594,8 @@ func (c *Config) Validate() error {
 		if !labelRe.MatchString(name) {
 			add("pool name %q may only use letters, digits, '.', '_' and '-'", name)
 		}
-		if p.Type != "lxc" && p.Type != "vm" && p.Type != "docker" {
-			add("pools.%s.type must be lxc, docker or vm", name)
-		}
-		if p.Type == "docker" {
-			// A container there has no Proxmox disk, bridge or host folder to give it.
-			switch {
-			case !c.Docker.Enabled():
-				add("pools.%s is type docker but docker.ssh is not set", name)
-			case p.Image == "":
-				add("pools.%s is type docker and needs an image (templates are Proxmox containers)", name)
-			case p.Cache || p.FullClone || p.Bridge != "" || p.VLAN != 0:
-				add("pools.%s is type docker, which has no cache, full_clone, bridge or vlan", name)
-			}
+		if p.Type != "lxc" && p.Type != "vm" {
+			add("pools.%s.type must be lxc or vm", name)
 		}
 		switch p.Mode {
 		case "ephemeral":
@@ -689,7 +611,7 @@ func (c *Config) Validate() error {
 		case p.Image != "":
 			if !imageRe.MatchString(p.Image) {
 				add("pools.%s.image %q must be a name like ubuntu-latest, optionally pinned as name@template-name-date-run", name, p.Image)
-			} else if p.Type != "docker" && p.DiskGB > 0 && p.DiskGB < c.Images.RootfsGB {
+			} else if p.DiskGB > 0 && p.DiskGB < c.Images.RootfsGB {
 				add("pools.%s.disk_gb (%d) is smaller than images.rootfs_gb (%d); Proxmox can't shrink disks", name, p.DiskGB, c.Images.RootfsGB)
 			}
 		case p.Template < 100:

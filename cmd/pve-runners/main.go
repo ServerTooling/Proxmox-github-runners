@@ -65,8 +65,6 @@ Usage:
                                               no running runner is using
   pve-runners config init|validate|show       write the default config (never over a non-empty one),
                                               check it, or print it (secrets are never in it)
-  pve-runners docker setup|check              docker pools' machine (docker.ssh): make this host's key and
-                                              print the script to run there, or test it
   pve-runners update [--now]                  check for (and install) a newer release
   pve-runners version
 
@@ -160,14 +158,6 @@ func run(args []string) error {
 			return err
 		}
 		return cmdCache(ctx, os.Stdout, *cfgPath, rest[0] == "clear")
-	case "docker":
-		if len(rest) == 0 {
-			return errors.New("usage: pve-runners docker setup|check")
-		}
-		if err := fs.Parse(rest[1:]); err != nil {
-			return err
-		}
-		return cmdDocker(ctx, os.Stdout, *cfgPath, rest[0])
 	case "config":
 		if len(rest) == 0 {
 			return errors.New("usage: pve-runners config init|validate|show")
@@ -370,16 +360,6 @@ func webActions(cfgPath string, imageBusy *atomic.Bool) []setup.Action {
 			Run: func(ctx context.Context, w io.Writer, _ map[string]string) error {
 				return cmdCache(ctx, w, cfgPath, true)
 			}},
-		{Name: "docker-setup", Group: "Docker machine", Label: "Set up Docker machine",
-			Help: "Make this host's key for docker.ssh and show the script to run on the machine.",
-			Run: func(ctx context.Context, w io.Writer, _ map[string]string) error {
-				return cmdDocker(ctx, w, cfgPath, "setup")
-			}},
-		{Name: "docker-check", Group: "Docker machine", Label: "Check Docker machine",
-			Help: "Test SSH, Docker, Sysbox and the runner network there.",
-			Run: func(ctx context.Context, w io.Writer, _ map[string]string) error {
-				return cmdDocker(ctx, w, cfgPath, "check")
-			}},
 		{Name: "logs-ship", Group: "Maintenance", Label: "Ship logs now", Help: "Send new log lines to Loki.",
 			Run: func(ctx context.Context, w io.Writer, _ map[string]string) error { return cmdLogsShip(ctx, w, cfgPath) }},
 		{Name: "config-show", Group: "Maintenance", Label: "Show config file", Help: "The file as saved; secrets are never in it.",
@@ -490,17 +470,12 @@ func imageManager(ctx context.Context, cfg *config.Config) (*images.Manager, err
 		Retention: time.Duration(cfg.Images.RetentionDays) * 24 * time.Hour, Now: time.Now, StateDir: stateDir}, nil
 }
 
-// imageRefs lists the distinct images the Proxmox pools use, in a stable order.
-func imageRefs(cfg *config.Config) []images.Ref { return poolImages(cfg, false) }
-
-// dockerRefs is imageRefs for docker pools.
-func dockerRefs(cfg *config.Config) []images.Ref { return poolImages(cfg, true) }
-
-func poolImages(cfg *config.Config, docker bool) []images.Ref {
+// imageRefs lists the distinct images the pools use, in a stable order.
+func imageRefs(cfg *config.Config) []images.Ref {
 	var refs []images.Ref
 	seen := map[string]bool{}
 	for _, n := range cfg.PoolNames() {
-		if img := cfg.Pools[n].Image; img != "" && !seen[img] && (cfg.Pools[n].Type == "docker") == docker {
+		if img := cfg.Pools[n].Image; img != "" && !seen[img] {
 			seen[img] = true
 			refs = append(refs, images.ParseRef(img))
 		}
@@ -515,18 +490,12 @@ func provisioner(ctx context.Context, cfg *config.Config) (*provision.Provisione
 	}
 	p := &provision.Provisioner{Cfg: cfg, Host: host(cfg), GitHub: githubFor(cfg), Now: time.Now, TmpDir: os.TempDir(),
 		NoLinkedClones: full}
-	if len(imageRefs(cfg)) > 0 || len(dockerRefs(cfg)) > 0 {
+	if len(imageRefs(cfg)) > 0 {
 		m, err := imageManager(ctx, cfg)
 		if err != nil {
 			return nil, err
 		}
 		p.Templates = func(ctx context.Context, image string) (int, error) { return m.Ensure(ctx, images.ParseRef(image)) }
-		if d := dockerHost(cfg); d != nil {
-			p.Docker = d
-			p.DockerImage = func(ctx context.Context, image string) (string, error) {
-				return m.EnsureDocker(ctx, images.ParseRef(image), d, dockerRefs(cfg))
-			}
-		}
 	}
 	return p, nil
 }
@@ -547,17 +516,6 @@ func syncImages(ctx context.Context, w io.Writer, cfg *config.Config, m *images.
 		}
 		slog.Info("image ready", "image", r.String(), "template", id)
 		fmt.Fprintf(w, "image %s ready as template %d\n", r, id)
-	}
-	if d := dockerHost(cfg); d != nil && pull {
-		for _, r := range dockerRefs(cfg) {
-			tag, err := m.EnsureDocker(ctx, r, d, dockerRefs(cfg))
-			if err != nil {
-				errs = append(errs, fmt.Errorf("docker image %s: %w", r, err))
-				continue
-			}
-			slog.Info("docker image ready", "image", r.String(), "tag", tag)
-			fmt.Fprintf(w, "image %s ready on the docker machine as %s\n", r, tag)
-		}
 	}
 	if !prune {
 		return errors.Join(errs...)
@@ -751,7 +709,7 @@ func cmdReconcile(ctx context.Context, w io.Writer, cfgPath string) error {
 	if err != nil {
 		return err
 	}
-	done, err := reconcileAll(ctx, cfg)
+	done, err := reconcile.Once(ctx, cfg, host(cfg), time.Now())
 	for _, a := range done {
 		fmt.Fprintf(w, "destroyed %d: %s\n", a.VMID, a.Reason)
 	}
@@ -865,16 +823,8 @@ func statusReport(ctx context.Context, cfgPath string) (*setup.StatusReport, err
 	if err != nil {
 		return nil, err
 	}
-	var warnings []string
-	if d := dockerHost(cfg); d != nil {
-		if drs, err := d.Runners(ctx); err != nil {
-			warnings = append(warnings, "docker machine: "+err.Error())
-		} else {
-			runners = append(runners, drs...)
-		}
-	}
 	sort.Slice(runners, func(i, j int) bool { return runners[i].VMID < runners[j].VMID })
-	r := &setup.StatusReport{Version: buildinfo.Version, Host: cfg.HostID, Max: cfg.Proxmox.MaxRunners, Warnings: warnings}
+	r := &setup.StatusReport{Version: buildinfo.Version, Host: cfg.HostID, Max: cfg.Proxmox.MaxRunners}
 	for _, g := range runners {
 		age := "?"
 		var sec int64
@@ -1149,7 +1099,7 @@ func cmdRun(ctx context.Context, cfgPath string) error {
 			if !gatewayChecked.Load() {
 				checkGateway(cfg)
 			}
-			done, err := reconcileAll(ctx, cfg)
+			done, err := reconcile.Once(ctx, cfg, host(cfg), time.Now())
 			for _, a := range done {
 				slog.Info("destroyed runner", "vmid", a.VMID, "reason", a.Reason)
 			}

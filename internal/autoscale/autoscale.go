@@ -60,8 +60,7 @@ type Listener struct {
 	// HostMax is proxmox.max_runners; GitHub is told the smaller of it and the pool's max.
 	HostMax int
 	Prov    *provision.Provisioner
-	// Host is where the pool's runners live: the Proxmox host, or the Docker machine.
-	Host pve.RunnerHost
+	Host    *pve.Host
 	// Private reports whether a repository may be served. Public ones are never acquired.
 	Private func(ctx context.Context, owner, repo string) (bool, error)
 	// Failed is told about spawn failures (the notify webhook); repeats of the same error are dropped.
