@@ -87,22 +87,3 @@ func TestRestartUnderway(t *testing.T) {
 		t.Fatal("other errors are failures")
 	}
 }
-
-// The machine script is pasted into a root shell, so it must parse, pin Sysbox's checksum and hand
-// the key over quoted, with "restrict" so the key can't open a terminal or forward ports.
-func TestMachineScript(t *testing.T) {
-	s, err := MachineScript("ghrunner", "ssh-ed25519 AAAAC3Nz pve-runners@pve1\n")
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, want := range []string{"user=ghrunner\n", "key='ssh-ed25519 AAAAC3Nz pve-runners@pve1'\n",
-		"echo " + sysboxSHA256 + "'  /tmp/sysbox-ce.deb' | sha256sum -c -", "printf 'restrict %s\\n' \"$key\"",
-		"{{range $k, $v := .Runtimes}}{{$k}} {{end}}"} {
-		if !strings.Contains(s, want) {
-			t.Errorf("script lacks %q:\n%s", want, s)
-		}
-	}
-	if out, err := exec.Command("sh", "-n", "-c", s).CombinedOutput(); err != nil {
-		t.Fatalf("sh -n: %v: %s", err, out)
-	}
-}

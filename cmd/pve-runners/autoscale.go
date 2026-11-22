@@ -14,7 +14,6 @@ import (
 	"github.com/ServerTooling/proxmox-github-runners/internal/github"
 	"github.com/ServerTooling/proxmox-github-runners/internal/notify"
 	"github.com/ServerTooling/proxmox-github-runners/internal/provision"
-	"github.com/ServerTooling/proxmox-github-runners/internal/pve"
 	"github.com/ServerTooling/proxmox-github-runners/internal/scaleset"
 )
 
@@ -43,16 +42,8 @@ func listeners(cfg *config.Config, prov *provision.Provisioner, n *notify.Notifi
 					return gh.RegistrationToken(ctx, t.InstallationID, t.Owner(), repo)
 				}}
 			for _, pn := range t.Pools {
-				var where pve.RunnerHost = prov.Host
-				hostMax := cfg.Proxmox.MaxRunners
-				if cfg.Pools[pn].Type == "docker" {
-					if prov.Docker == nil {
-						return nil, fmt.Errorf("pool %s: %w", pn, provision.ErrNoDocker)
-					}
-					where, hostMax = prov.Docker, cfg.Docker.MaxRunners
-				}
 				l := &autoscale.Listener{Service: client, Target: t, Repo: repo, PoolName: pn, Pool: cfg.Pools[pn],
-					HostID: cfg.HostID, HostMax: hostMax, Prov: prov, Host: where, Jobs: jobs,
+					HostID: cfg.HostID, HostMax: cfg.Proxmox.MaxRunners, Prov: prov, Host: prov.Host, Jobs: jobs,
 					Private: func(ctx context.Context, owner, r string) (bool, error) {
 						return gh.RepoPrivate(ctx, t.InstallationID, owner, r)
 					},

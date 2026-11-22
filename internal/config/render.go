@@ -144,12 +144,8 @@ pools:{{if not .Pools}} {}{{end}}
     # Runner size.
     cores: {{.Cores}}
     memory_mb: {{.MemoryMB}}
-{{- if eq .Type "docker"}}
-    # Most runners of this pool at once (docker.max_runners still caps the machine).
-{{- else}}
     disk_gb: {{.DiskGB}}
     # Most runners of this pool at once (proxmox.max_runners still caps the host).
-{{- end}}
     max: {{.Max}}
 {{- if .Min}}
     # Keep this many idle runners ready at all times.
@@ -164,18 +160,6 @@ pools:{{if not .Pools}} {}{{end}}
     # warm: 1
     # warm_for: 30m
 {{- end}}
-{{- if .MaxLifetime}}
-    # Destroy runners older than this.
-    max_lifetime: {{dur .MaxLifetime}}
-{{- else}}
-    # Destroy runners older than this:
-    # max_lifetime: 6h
-{{- end}}
-{{- if .ScaleSet}}
-    # GitHub scale set name (what runs-on matches); defaults to the first label.
-    scale_set: {{q .ScaleSet}}
-{{- end}}
-{{- if ne .Type "docker"}}
 {{- if .Cache}}
     # Mount the owner's shared cache (cache.dir) so toolchains and package downloads are kept.
     cache: true
@@ -186,11 +170,22 @@ pools:{{if not .Pools}} {}{{end}}
 {{- if .FullClone}}
     full_clone: true
 {{- end}}
+{{- if .MaxLifetime}}
+    # Destroy runners older than this.
+    max_lifetime: {{dur .MaxLifetime}}
+{{- else}}
+    # Destroy runners older than this:
+    # max_lifetime: 6h
+{{- end}}
 {{- if ne .Bridge $.Proxmox.Bridge}}
     bridge: {{q .Bridge}}
 {{- else}}
     # Use another bridge than proxmox.bridge for this pool:
     # bridge: vmbr1
+{{- end}}
+{{- if .ScaleSet}}
+    # GitHub scale set name (what runs-on matches); defaults to the first label.
+    scale_set: {{q .ScaleSet}}
 {{- end}}
 {{- if .VLAN}}
     vlan: {{.VLAN}}
@@ -198,23 +193,7 @@ pools:{{if not .Pools}} {}{{end}}
     # Tag the runner NIC with a VLAN:
     # vlan: 50
 {{- end}}
-{{- end}}
 {{- end}}{{end}}
-
-docker:
-  # A second machine with Docker and Sysbox (a NAS, say) for pools with "type: docker". This host
-  # drives it over SSH and starts one container per job there, removed after the job. Runners there
-  # are kept off the LAN by the network settings above. Empty ssh: no docker pools. "pve-runners
-  # docker setup" prints what to run on the machine.
-  ssh: {{q .Docker.SSH}}
-  port: {{.Docker.Port}}
-  # This host's SSH key for the machine, and the machine's pinned host key.
-  key_file: {{q .Docker.KeyFile}}
-  known_hosts: {{q .Docker.KnownHosts}}
-  # Most runner containers at once on the machine, across all docker pools.
-  max_runners: {{.Docker.MaxRunners}}
-  # IDs for runner containers; must not overlap proxmox.vmid_range or images.vmid_range.
-  id_range: {{ids .Docker.IDRange}}
 
 autoscale:
   # Listen to GitHub's job queue and start a runner for each queued job (outbound HTTPS only).

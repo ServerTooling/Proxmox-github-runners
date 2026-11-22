@@ -90,30 +90,6 @@ Configuration reference: [packaging/config.example.yaml](packaging/config.exampl
 runner is 4 cores, 8 GB RAM and a 40 GB disk, with at most 4 runners per host
 (`proxmox.max_runners`).
 
-## Runners on a Docker machine (NAS)
-
-A second machine with Docker, such as a NAS, can run runners too, without Proxmox on it. The service
-on the Proxmox host drives it over SSH: for each job it starts one container from the same published
-image, and removes it after the job. Containers run under [Sysbox](https://github.com/nestybox/sysbox),
-which boots the image's systemd and lets jobs use Docker inside their runner without privileges on
-the machine. One config, one GitHub App per org and the app's settings screen cover both machines.
-
-1. In the app's settings, set **Docker machine > SSH login** to a user to create there, such as
-   `ghrunner@192.0.2.20`, and save.
-2. Run **Set up Docker machine** (`pve-runners docker setup`). It makes this host's SSH key, pins the
-   machine's host key and prints a script.
-3. On the machine, stop the containers its Docker runs (installing Sysbox restarts Docker), log in
-   over SSH as an admin, run `sudo -i` and paste the script. It installs Sysbox (checksum-verified) and
-   adds the user, which only this host's key can log in as. Start your containers again.
-4. Run **Check Docker machine** (`pve-runners docker check`).
-5. Add a pool with **Runs on: docker**, an image (`ubuntu-latest`) and its own label, such as `nas`,
-   and add the pool to your orgs. Workflows use it with `runs-on: nas`.
-
-LAN isolation works there too: before each runner starts, rules in the machine's `mangle` table drop
-traffic from the runner network to `network.blocked` (except `network.allow`) and to the machine
-itself. A docker pool has no cache, disk size, bridge or VLAN, and its runners' logs and usage are
-not shipped to Loki yet.
-
 ## Faster job starts
 
 Two pool settings cut the wait before a job's first step. Every job still gets a fresh container.

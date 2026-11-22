@@ -152,7 +152,7 @@ func (l *Listener) label(ctx context.Context, j scaleset.Job) {
 		return slices.ContainsFunc(jobTagPrefixes, func(p string) bool { return strings.HasPrefix(t, p) })
 	})
 	tags = append(tags, JobTags(j, run.HeadBranch)...)
-	if err := l.Host.Label(ctx, g.VMID, tags, jobNotes(j, run)); err != nil {
+	if err := l.Host.Exec(ctx, pve.LXCLabelCmd(g.VMID, tags, jobNotes(j, run))); err != nil {
 		l.log().Warn("labelling runner failed", "listener", l.Name(), "vmid", g.VMID, "err", err)
 	}
 }
