@@ -17,7 +17,13 @@ func reuseHarness(t *testing.T, diskUsed string) (*harness, *clock, *logBuf) {
 	h.l.Pool.ReuseFor = 30 * time.Minute
 	h.pve.Outputs = map[string]string{dfCmd: "Use%\n " + diskUsed + "\n"}
 	c := withClock(h)
-	return h, c, withLog(h)
+	logs := withLog(h)
+	t.Cleanup(func() {
+		if t.Failed() {
+			t.Logf("log:\n%s\ncommands:\n%s", logs.String(), strings.Join(h.pve.Mutations(), "\n"))
+		}
+	})
+	return h, c, logs
 }
 
 func job(typ string, id int64, repo, runner string) scalesettest.Job {
@@ -33,7 +39,8 @@ func guestTags(h *harness, id int) string {
 func runOneJob(t *testing.T, h *harness, repo string) {
 	t.Helper()
 	h.svc.Push(1, job("JobAvailable", 1, repo, ""))
-	eventually(t, "runner", func() bool { return hasVMID(h, t, 9000) })
+	// Its spawn has finished (the runner service is started last), as before any real job.
+	eventually(t, "runner", func() bool { return calls(h, "systemctl start gh-runner.service") == 1 })
 	h.svc.Push(1, job("JobStarted", 1, repo, "gh-pve1-small-9000"))
 	h.svc.Push(0, job("JobCompleted", 1, repo, "gh-pve1-small-9000"))
 	eventually(t, "kept", func() bool { return strings.Contains(guestTags(h, 9000), "kept-") })
@@ -112,7 +119,7 @@ func TestFullDiskIsNotKept(t *testing.T) {
 	h, _, logs := reuseHarness(t, "80%")
 	h.start(t)
 	h.svc.Push(1, job("JobAvailable", 1, "app", ""))
-	eventually(t, "runner", func() bool { return hasVMID(h, t, 9000) })
+	eventually(t, "runner", func() bool { return calls(h, "systemctl start gh-runner.service") == 1 })
 	h.svc.Push(1, job("JobStarted", 1, "app", "gh-pve1-small-9000"))
 	h.svc.Push(0, job("JobCompleted", 1, "app", "gh-pve1-small-9000"))
 	eventually(t, "destroyed", func() bool { return !hasVMID(h, t, 9000) })

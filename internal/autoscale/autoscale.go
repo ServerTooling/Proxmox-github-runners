@@ -120,6 +120,8 @@ type Listener struct {
 	arming   map[int]string
 	keeping  map[string]bool
 	needRoom bool
+	// tagMu serializes the read-change-write of a guest's tags (label, keep, rearm).
+	tagMu sync.Mutex
 }
 
 // Runner states, as logged in "runner state" lines.
@@ -558,6 +560,11 @@ func (l *Listener) step(vmid int, step string) {
 // is destroyed here, so the caller's count goes down and it starts a replacement while the jobs are still there.
 func (l *Listener) survey(ctx context.Context) (fleet, error) {
 	var f fleet
+	// Read before the guest list: a guest whose keeping ended after this read already carries its kept
+	// tag in the list, while one read the other way round would look like an idle runner and be trimmed.
+	l.stepMu.Lock()
+	keeping := maps.Clone(l.keeping)
+	l.stepMu.Unlock()
 	runners, err := l.Host.Runners(ctx)
 	if err != nil {
 		return f, err
@@ -567,7 +574,7 @@ func (l *Listener) survey(ctx context.Context) (fleet, error) {
 		l.registered = map[int]bool{}
 	}
 	l.stepMu.Lock()
-	starting, spawning, keeping := maps.Clone(l.starting), l.spawning, maps.Clone(l.keeping)
+	starting, spawning := maps.Clone(l.starting), l.spawning
 	armedFor := ""
 	for _, tag := range l.arming {
 		armedFor = tag

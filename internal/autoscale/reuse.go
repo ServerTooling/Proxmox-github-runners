@@ -233,11 +233,11 @@ func (l *Listener) rearm(ctx context.Context, g pve.Guest, setID int64) error {
 		return err
 	}
 	// Armed before the runner starts, so cleanup never takes it for a dead runner meanwhile.
-	tags := append(withoutReuseTags(g.Tags(), "kept-", "armed-", "runnerid-"), pve.ArmedTag(l.now()))
+	add := []string{pve.ArmedTag(l.now())}
 	if jit.Runner.ID != 0 {
-		tags = append(tags, provision.RunnerIDTag(jit.Runner.ID))
+		add = append(add, provision.RunnerIDTag(jit.Runner.ID))
 	}
-	if err := l.Prov.Host.SetTags(ctx, g.VMID, tags); err != nil {
+	if err := l.retag(ctx, g.Name, add, "kept-", "armed-", "runnerid-"); err != nil {
 		return err
 	}
 	if err := l.Prov.Rearm(ctx, g.VMID, jit); err != nil {
@@ -245,6 +245,17 @@ func (l *Listener) rearm(ctx context.Context, g pve.Guest, setID int64) error {
 	}
 	l.step(g.VMID, "service started")
 	return nil
+}
+
+// retag re-reads a guest's tags, drops those with the given prefixes and adds add, under tagMu.
+func (l *Listener) retag(ctx context.Context, name string, add []string, drop ...string) error {
+	l.tagMu.Lock()
+	defer l.tagMu.Unlock()
+	g, ok := l.guest(ctx, name)
+	if !ok {
+		return fmt.Errorf("runner %s is gone", name)
+	}
+	return l.Prov.Host.SetTags(ctx, g.VMID, append(withoutReuseTags(g.Tags(), drop...), add...))
 }
 
 func (l *Listener) guest(ctx context.Context, name string) (pve.Guest, bool) {
@@ -311,8 +322,7 @@ func (l *Listener) keep(ctx context.Context, j scaleset.Job) {
 		if err := l.Prov.Clean(ctx, g.VMID); err != nil {
 			return err
 		}
-		tags := append(withoutReuseTags(g.Tags(), "kept-", "armed-", "reuse-"), repo, pve.KeptTag(until))
-		return l.Prov.Host.SetTags(ctx, g.VMID, tags)
+		return l.retag(ctx, g.Name, []string{repo, pve.KeptTag(until)}, "kept-", "armed-", "reuse-")
 	}()
 	if err != nil {
 		l.log().Info("runner not kept for reuse; destroying it", "listener", l.Name(), "vmid", g.VMID, "runner", g.Name,
