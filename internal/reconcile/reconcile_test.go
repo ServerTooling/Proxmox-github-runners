@@ -99,15 +99,27 @@ func TestOnceLeavesKeptAndArmedRunnersAlone(t *testing.T) {
 	cfg := config.Default()
 	cfg.Pools["small"] = &config.Pool{ReuseFor: 30 * time.Minute}
 	h := &pve.Host{R: f, Node: "pve1", VMIDRange: [2]int{9000, 9010}}
-	done, err := Once(context.Background(), cfg, h, now)
-	if err != nil {
-		t.Fatal(err)
+	destroyed := func(now time.Time) []int {
+		t.Helper()
+		done, err := Once(context.Background(), cfg, h, now)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := []int{}
+		for _, a := range done {
+			got = append(got, a.VMID)
+		}
+		return got
 	}
-	got := []int{}
-	for _, a := range done {
-		got = append(got, a.VMID)
+	// 9003's unit stopped without a kept tag: its runner may have just finished a job, and the
+	// autoscaler tags it kept within seconds, so it gets ReuseSettle before it counts as dead.
+	if got := destroyed(now); !reflect.DeepEqual(got, []int{9001}) {
+		t.Fatalf("destroyed %v, want [9001]", got)
 	}
-	if !reflect.DeepEqual(got, []int{9001, 9003}) {
-		t.Fatalf("destroyed %v, want [9001 9003]", got)
+	if got := destroyed(now.Add(ReuseSettle - time.Second)); len(got) != 0 {
+		t.Fatalf("destroyed %v before ReuseSettle", got)
+	}
+	if got := destroyed(now.Add(ReuseSettle)); !reflect.DeepEqual(got, []int{9003}) {
+		t.Fatalf("destroyed %v, want [9003]", got)
 	}
 }

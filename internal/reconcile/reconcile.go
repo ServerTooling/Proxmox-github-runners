@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/ServerTooling/proxmox-github-runners/internal/config"
@@ -51,7 +52,7 @@ func Once(ctx context.Context, cfg *config.Config, h *pve.Host, now time.Time) (
 		return nil, err
 	}
 	actions := Plan(cfg, runners, now)
-	actions = append(actions, deadRunners(ctx, h, runners, actions, now)...)
+	actions = append(actions, deadRunners(ctx, cfg, h, runners, actions, now)...)
 	var done []Action
 	var errs []error
 	for _, a := range actions {
@@ -68,12 +69,13 @@ func Once(ctx context.Context, cfg *config.Config, h *pve.Host, now time.Time) (
 // off: the unit stops the guest when the runner exits, but a guest that was started again (by hand,
 // or by a host restart) just sits there with nothing to run. Guests whose state can't be read are
 // left alone; the next pass tries again.
-func deadRunners(ctx context.Context, h *pve.Host, runners []pve.Guest, planned []Action, now time.Time) []Action {
+func deadRunners(ctx context.Context, cfg *config.Config, h *pve.Host, runners []pve.Guest, planned []Action, now time.Time) []Action {
 	skip := map[int]bool{}
 	for _, a := range planned {
 		skip[a.VMID] = true
 	}
 	var out []Action
+	seen := map[int]bool{}
 	for _, g := range runners {
 		created, _ := strconv.ParseInt(g.TagValue("created"), 10, 64)
 		if skip[g.VMID] || g.Status != "running" || g.TagValue("mode") != "ephemeral" ||
@@ -96,9 +98,52 @@ func deadRunners(ctx context.Context, h *pve.Host, runners []pve.Guest, planned 
 		if err != nil {
 			continue
 		}
-		if state == "inactive" || state == "failed" {
-			out = append(out, Action{g.VMID, "runner service " + state})
+		if state != "inactive" && state != "failed" {
+			continue
+		}
+		if pool := cfg.Pools[g.TagValue("pool")]; pool != nil && pool.ReuseFor > 0 {
+			// Its runner just finished a job: the autoscaler tags it kept within seconds. Destroying it
+			// meanwhile (seen on a host: pct stop mid-cleanup) loses the container it is keeping.
+			if first := reuseDead.since(g.VMID, now); now.Sub(first) < ReuseSettle {
+				seen[g.VMID] = true
+				continue
+			}
+		}
+		out = append(out, Action{g.VMID, "runner service " + state})
+	}
+	reuseDead.keep(seen)
+	return out
+}
+
+// ReuseSettle is how long a runner of a reuse_for pool may sit with its unit stopped and no kept tag
+// before it counts as dead.
+const ReuseSettle = 3 * time.Minute
+
+// reuseDead remembers since when each such runner was first seen stopped (across reconcile passes).
+var reuseDead = &deadSince{m: map[int]time.Time{}}
+
+type deadSince struct {
+	mu sync.Mutex
+	m  map[int]time.Time
+}
+
+func (d *deadSince) since(id int, now time.Time) time.Time {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if t, ok := d.m[id]; ok {
+		return t
+	}
+	d.m[id] = now
+	return now
+}
+
+// keep forgets every runner not seen stopped in this pass.
+func (d *deadSince) keep(seen map[int]bool) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	for id := range d.m {
+		if !seen[id] {
+			delete(d.m, id)
 		}
 	}
-	return out
 }

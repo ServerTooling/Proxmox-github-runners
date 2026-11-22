@@ -312,6 +312,11 @@ func (l *Listener) keep(ctx context.Context, j scaleset.Job) {
 		if !until.After(l.now().Add(time.Minute)) {
 			return errors.New("max_lifetime is up")
 		}
+		// Tagged kept first: its runner unit has stopped, and cleanup (reconcile) destroys a running guest
+		// with a stopped unit unless it is kept. The listener doesn't arm it while keeping is set.
+		if err := l.retag(ctx, g.Name, []string{repo, pve.KeptTag(until)}, "kept-", "armed-", "reuse-"); err != nil {
+			return err
+		}
 		used, err := l.Prov.DiskUsedPercent(ctx, g.VMID)
 		if err != nil {
 			return err
@@ -319,10 +324,7 @@ func (l *Listener) keep(ctx context.Context, j scaleset.Job) {
 		if used >= maxDiskPercent {
 			return fmt.Errorf("its disk is %d%% full (limit %d%%)", used, maxDiskPercent)
 		}
-		if err := l.Prov.Clean(ctx, g.VMID); err != nil {
-			return err
-		}
-		return l.retag(ctx, g.Name, []string{repo, pve.KeptTag(until)}, "kept-", "armed-", "reuse-")
+		return l.Prov.Clean(ctx, g.VMID)
 	}()
 	if err != nil {
 		l.log().Info("runner not kept for reuse; destroying it", "listener", l.Name(), "vmid", g.VMID, "runner", g.Name,
