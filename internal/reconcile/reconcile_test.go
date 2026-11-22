@@ -84,3 +84,30 @@ func TestOnceDestroysRunningGuestWhoseRunnerEnded(t *testing.T) {
 		t.Fatalf("got %q", f.Mutations())
 	}
 }
+
+// A reused runner's unit is stopped while it waits; only a kept guest past its time is cleaned up.
+func TestOnceLeavesKeptAndArmedRunnersAlone(t *testing.T) {
+	now := time.Unix(1700010000, 0)
+	old := "gh-runner;pool-small;mode-ephemeral;created-1700000000;"
+	f := pvetest.New(
+		pve.Guest{VMID: 9000, Type: "lxc", Status: "running", RawTags: old + "kept-1700010600"},
+		pve.Guest{VMID: 9001, Type: "lxc", Status: "running", RawTags: old + "kept-1700009000"},
+		pve.Guest{VMID: 9002, Type: "lxc", Status: "running", RawTags: old + "armed-1700009990"},
+		pve.Guest{VMID: 9003, Type: "lxc", Status: "running", RawTags: old + "armed-1700000000"},
+	)
+	f.UnitState = map[int]string{9000: "inactive", 9001: "inactive", 9002: "inactive", 9003: "inactive"}
+	cfg := config.Default()
+	cfg.Pools["small"] = &config.Pool{ReuseFor: 30 * time.Minute}
+	h := &pve.Host{R: f, Node: "pve1", VMIDRange: [2]int{9000, 9010}}
+	done, err := Once(context.Background(), cfg, h, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := []int{}
+	for _, a := range done {
+		got = append(got, a.VMID)
+	}
+	if !reflect.DeepEqual(got, []int{9001, 9003}) {
+		t.Fatalf("destroyed %v, want [9001 9003]", got)
+	}
+}

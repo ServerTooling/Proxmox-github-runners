@@ -160,6 +160,14 @@ pools:{{if not .Pools}} {}{{end}}
     # warm: 1
     # warm_for: 30m
 {{- end}}
+{{- if .ReuseFor}}
+    # Keep a runner's container after its job and give it the next job from the same repo, for this long.
+    reuse_for: {{dur .ReuseFor}}
+{{- else}}
+    # Keep a runner's container after its job and give it the next job from the same repo, for this long
+    # (Docker images, packages and the checkout stay; can't be combined with warm or min):
+    # reuse_for: 30m
+{{- end}}
 {{- if .Cache}}
     # Mount the owner's shared cache (cache.dir) so toolchains and package downloads are kept.
     cache: true

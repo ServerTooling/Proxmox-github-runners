@@ -600,3 +600,55 @@ func TestSpawnStopsAHungClone(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// A pool with reuse_for keeps the guest up when its runner exits: a drop-in clears the image's
+// power-off, and systemd reads it before the runner starts.
+func TestSpawnForReusePoolKeepsGuestAfterJob(t *testing.T) {
+	p, f, gh := setup(t)
+	gh.RunnerGroups["Example-Org"] = gh.RunnerGroups["example-org"]
+	p.Cfg.Pools["small"].ReuseFor = 30 * time.Minute
+	if _, err := p.Spawn(context.Background(), Request{Pool: "small", Target: org}); err != nil {
+		t.Fatal(err)
+	}
+	if got := f.Pushed["9000:"+reuseDropInPath]; got != "[Service]\nExecStopPost=\n" {
+		t.Fatalf("drop-in = %q", got)
+	}
+	m := f.Mutations()
+	last := m[len(m)-1]
+	if !strings.Contains(last, "systemctl daemon-reload || exit 1\nsystemctl start gh-runner.service") {
+		t.Fatalf("start: %q", last)
+	}
+	i := slices.IndexFunc(m, func(c string) bool { return strings.HasSuffix(c, reuseDropInPath+" --perms 0644") })
+	j := slices.IndexFunc(m, func(c string) bool { return strings.HasSuffix(c, "/etc/gh-runner/jitconfig --perms 0600") })
+	if i < 0 || j < i {
+		t.Fatalf("drop-in must go in before the config: %q", m)
+	}
+}
+
+func TestRearmPushesConfigThenStartsRunner(t *testing.T) {
+	p, f, _ := setup(t)
+	if err := p.Rearm(context.Background(), 9000, &github.JITConfig{EncodedJITConfig: "jit-2"}); err != nil {
+		t.Fatal(err)
+	}
+	m := f.Mutations()
+	if len(m) != 2 || !strings.HasSuffix(m[0], "/etc/gh-runner/jitconfig --perms 0600") || m[1] != "pct exec 9000 -- sh -c "+armScript {
+		t.Fatalf("commands %q", m)
+	}
+	if f.Pushed["9000:/etc/gh-runner/jitconfig"] != "jit-2" {
+		t.Fatal("config not pushed")
+	}
+	if err := p.Clean(context.Background(), 9000); err != nil || f.Mutations()[2] != "pct exec 9000 -- sh -c "+cleanScript {
+		t.Fatalf("clean: %v %q", err, f.Mutations())
+	}
+}
+
+func TestParseDfPercent(t *testing.T) {
+	for in, want := range map[string]int{"Use%\n 42%\n": 42, "Use%\n100%": 100} {
+		if got, err := ParseDfPercent([]byte(in)); err != nil || got != want {
+			t.Errorf("%q: %d %v", in, got, err)
+		}
+	}
+	if _, err := ParseDfPercent([]byte("")); err == nil {
+		t.Error("empty output accepted")
+	}
+}

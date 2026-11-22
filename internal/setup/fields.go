@@ -223,6 +223,12 @@ func poolFields() []poolField {
 				p.WarmFor, err = parseDur("warm_for", v)
 				return err
 			}},
+		{Key: "reuse_for", Label: "Reuse a runner for the same repo's next job for (empty for never)", Kind: "text",
+			get: func(p *config.Pool) string { return fmtDur(p.ReuseFor) },
+			set: func(p *config.Pool, v string) (err error) {
+				p.ReuseFor, err = parseDur("reuse_for", v)
+				return err
+			}},
 		{Key: "cache", Label: "Shared cache (tools and packages kept between jobs)", Kind: "bool",
 			get: func(p *config.Pool) string { return strconv.FormatBool(p.Cache) },
 			set: func(p *config.Pool, v string) error { p.Cache = checked(v); return nil }},

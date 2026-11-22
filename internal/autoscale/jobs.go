@@ -130,6 +130,18 @@ func (l *Listener) label(ctx context.Context, j scaleset.Job) {
 	}
 	ctx, cancel := context.WithTimeout(ctx, time.Minute)
 	defer cancel()
+	var run github.Run
+	if l.WorkflowRun != nil && j.WorkflowRunID != 0 {
+		var err error
+		if run, err = l.WorkflowRun(ctx, j.OwnerName, j.RepositoryName, j.WorkflowRunID); err != nil {
+			// The tags without the branch are still worth having.
+			l.log().Warn("reading workflow run failed", "listener", l.Name(), "run_id", j.WorkflowRunID, "err", err)
+		}
+	}
+	// Tags are read, changed and written back whole; reuse (keep, rearm) writes them too, and a write
+	// from a stale read would drop its tags.
+	l.tagMu.Lock()
+	defer l.tagMu.Unlock()
 	gs, err := l.Host.Runners(ctx)
 	if err != nil {
 		l.log().Warn("labelling runner failed", "listener", l.Name(), "runner", j.RunnerName, "err", err)
@@ -140,16 +152,10 @@ func (l *Listener) label(ctx context.Context, j scaleset.Job) {
 		return
 	}
 	g := gs[i]
-	var run github.Run
-	if l.WorkflowRun != nil && j.WorkflowRunID != 0 {
-		if run, err = l.WorkflowRun(ctx, j.OwnerName, j.RepositoryName, j.WorkflowRunID); err != nil {
-			// The tags without the branch are still worth having.
-			l.log().Warn("reading workflow run failed", "listener", l.Name(), "run_id", j.WorkflowRunID, "err", err)
-		}
-	}
 	// A persistent runner keeps its guest between jobs, so the previous job's tags go first.
 	tags := slices.DeleteFunc(g.Tags(), func(t string) bool {
-		return slices.ContainsFunc(jobTagPrefixes, func(p string) bool { return strings.HasPrefix(t, p) })
+		// armed-: a reused runner has begun the job it was started again for.
+		return strings.HasPrefix(t, "armed-") || slices.ContainsFunc(jobTagPrefixes, func(p string) bool { return strings.HasPrefix(t, p) })
 	})
 	tags = append(tags, JobTags(j, run.HeadBranch)...)
 	if err := l.Host.Exec(ctx, pve.LXCLabelCmd(g.VMID, tags, jobNotes(j, run))); err != nil {

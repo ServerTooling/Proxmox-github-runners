@@ -80,6 +80,18 @@ func deadRunners(ctx context.Context, h *pve.Host, runners []pve.Guest, planned 
 			created == 0 || now.Sub(time.Unix(created, 0)) < StartGrace {
 			continue
 		}
+		// A reused runner's unit is stopped while its guest waits for the next job of its repo, and for a
+		// moment while it is started again; the autoscaler ends both. These only catch the leftovers of
+		// a listener that is gone (its pool or target removed, or the service stopped).
+		if until := g.TagTime("kept"); !until.IsZero() {
+			if now.After(until) {
+				out = append(out, Action{g.VMID, "kept for reuse past its time"})
+			}
+			continue
+		}
+		if at := g.TagTime("armed"); !at.IsZero() && now.Sub(at) < StartGrace {
+			continue
+		}
 		state, err := h.RunnerUnitState(ctx, g.VMID)
 		if err != nil {
 			continue

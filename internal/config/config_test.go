@@ -333,3 +333,21 @@ docker:
 		t.Fatalf("docker section written back:\n%s", out)
 	}
 }
+
+func TestReuseForValidation(t *testing.T) {
+	c, _, err := Parse([]byte(valid + "    reuse_for: 30m\n"))
+	if err != nil || c.Pools["small"].ReuseFor != 30*time.Minute {
+		t.Fatalf("reuse_for: %v %+v", err, c)
+	}
+	for _, tc := range []struct{ extra, want string }{
+		{"    reuse_for: 5h\n", "between 0 and 4h0m0s"},
+		{"    reuse_for: 30m\n    warm: 1\n", "can't be combined with warm or min"},
+		{"    reuse_for: 30m\n    min: 1\n", "can't be combined with warm or min"},
+		{"  big: {type: vm, template: 8001, labels: [big], reuse_for: 30m}\n", "only works for lxc pools"},
+	} {
+		_, _, err := Parse([]byte(valid + tc.extra))
+		if err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%q: got %v, want %q", tc.extra, err, tc.want)
+		}
+	}
+}
