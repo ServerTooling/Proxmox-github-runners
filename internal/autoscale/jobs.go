@@ -149,7 +149,8 @@ func (l *Listener) label(ctx context.Context, j scaleset.Job) {
 	}
 	// A persistent runner keeps its guest between jobs, so the previous job's tags go first.
 	tags := slices.DeleteFunc(g.Tags(), func(t string) bool {
-		return slices.ContainsFunc(jobTagPrefixes, func(p string) bool { return strings.HasPrefix(t, p) })
+		// armed-: a reused runner has begun the job it was started again for.
+		return strings.HasPrefix(t, "armed-") || slices.ContainsFunc(jobTagPrefixes, func(p string) bool { return strings.HasPrefix(t, p) })
 	})
 	tags = append(tags, JobTags(j, run.HeadBranch)...)
 	if err := l.Host.Label(ctx, g.VMID, tags, jobNotes(j, run)); err != nil {

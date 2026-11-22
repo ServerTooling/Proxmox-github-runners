@@ -349,11 +349,18 @@ func (p *Provisioner) Spawn(ctx context.Context, req Request) (res *Result, err 
 			return nil, err
 		}
 	}
+	start := startRunner
+	if pool.ReuseFor > 0 {
+		if err = p.pushFile(ctx, id, reuseDropIn, reuseDropInPath, "0644"); err != nil {
+			return nil, err
+		}
+		start = strings.Replace(startRunner, "systemctl start", "systemctl daemon-reload || exit 1\nsystemctl start", 1)
+	}
 	if err = p.pushFile(ctx, id, jit.EncodedJITConfig, "/etc/gh-runner/jitconfig", "0600"); err != nil {
 		return nil, err
 	}
 	step("files pushed")
-	if err = p.Host.Exec(ctx, pve.LXCExec(id, "sh", "-c", startRunner)); err != nil {
+	if err = p.Host.Exec(ctx, pve.LXCExec(id, "sh", "-c", start)); err != nil {
 		return nil, fmt.Errorf("runner service did not start in %d: %w", id, err)
 	}
 	step("service started")
@@ -389,6 +396,65 @@ until s=$(systemctl is-system-running 2>/dev/null); [ "$s" = running ] || [ "$s"
 done
 systemctl start gh-runner.service || exit 1
 exec systemctl is-active gh-runner.service`
+
+// reuseDropIn keeps the guest up when its runner exits (pool.reuse_for): the image's unit powers the
+// guest off after its one job, and the autoscaler starts it again for the next job of the same repo.
+const (
+	reuseDropInPath = "/etc/systemd/system/gh-runner.service.d/reuse.conf"
+	reuseDropIn     = "[Service]\nExecStopPost=\n"
+)
+
+// cleanScript runs in a kept guest after its job: containers, volumes and networks the job left go, so
+// the next job doesn't find a database or server still running; images and the build cache stay,
+// which is what keeping the guest is for.
+const cleanScript = `command -v docker >/dev/null 2>&1 || exit 0
+ids=$(docker ps -aq) || exit 1
+if [ -n "$ids" ]; then docker rm -f -v $ids >/dev/null || exit 1; fi
+docker volume prune -af >/dev/null 2>&1 || docker volume prune -f >/dev/null || exit 1
+docker network prune -f >/dev/null || exit 1`
+
+// armScript starts the runner of a kept guest again with the config just pushed. The finished runner
+// must be gone first (its unit stopped), and the previous registration's files are removed so the
+// new JIT config is the only one the runner can read.
+const armScript = `case $(systemctl is-active gh-runner.service) in active|activating|deactivating) exit 3;; esac
+rm -f /opt/actions-runner/.runner /opt/actions-runner/.credentials /opt/actions-runner/.credentials_rsaparams
+systemctl reset-failed gh-runner.service 2>/dev/null
+systemctl start gh-runner.service || exit 1
+exec systemctl is-active gh-runner.service`
+
+// Clean readies a kept guest (pool.reuse_for) for another job of its repo.
+func (p *Provisioner) Clean(ctx context.Context, id int) error {
+	return p.Host.Exec(ctx, pve.LXCExec(id, "sh", "-c", cleanScript))
+}
+
+// DiskUsedPercent reports how full a guest's root disk is.
+func (p *Provisioner) DiskUsedPercent(ctx context.Context, id int) (int, error) {
+	out, err := p.Host.Output(ctx, pve.LXCExec(id, "df", "--output=pcent", "/"))
+	if err != nil {
+		return 0, err
+	}
+	return ParseDfPercent(out)
+}
+
+// ParseDfPercent reads `df --output=pcent` ("Use%" then " 42%").
+func ParseDfPercent(out []byte) (int, error) {
+	f := strings.Fields(string(out))
+	if len(f) < 2 {
+		return 0, fmt.Errorf("unexpected df output %q", out)
+	}
+	return strconv.Atoi(strings.TrimSuffix(f[len(f)-1], "%"))
+}
+
+// Rearm hands a kept guest a new single-use runner config and starts its runner again.
+func (p *Provisioner) Rearm(ctx context.Context, id int, jit *github.JITConfig) error {
+	if err := p.pushFile(ctx, id, jit.EncodedJITConfig, "/etc/gh-runner/jitconfig", "0600"); err != nil {
+		return err
+	}
+	if err := p.Host.Exec(ctx, pve.LXCExec(id, "sh", "-c", armScript)); err != nil {
+		return fmt.Errorf("runner service did not start again in %d: %w", id, err)
+	}
+	return nil
+}
 
 func (p *Provisioner) jit(ctx context.Context, req Request, name string, labels []string) (*github.JITConfig, error) {
 	if req.JIT != nil {

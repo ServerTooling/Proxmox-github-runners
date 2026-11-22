@@ -138,9 +138,10 @@ var changedPool = map[string]string{
 	"memory_mb":    "16384",
 	"disk_gb":      "60",
 	"max":          "3",
-	"min":          "1",
-	"warm":         "2",
-	"warm_for":     "45m",
+	"min":          "0", // reuse_for can't be combined with min or warm
+	"warm":         "0",
+	"warm_for":     "", // not written while warm is 0
+	"reuse_for":    "20m",
 	"max_lifetime": "6h",
 	"bridge":       "vmbr5",
 	"vlan":         "20",

@@ -116,12 +116,26 @@ not shipped to Loki yet.
 
 ## Faster job starts
 
-Two pool settings cut the wait before a job's first step. Every job still gets a fresh container.
+These pool settings cut the wait before a job's first step. Except with `reuse_for`, every job gets a
+fresh container.
 
 - `warm: N` keeps N spare runners started after a job, so the next job takes one at once instead of
   waiting for a clone and boot. Once no job has come for `warm_for` (30m by default) the spares are
   removed. `min: N` instead keeps N ready at all times. A runner is only removed after GitHub agrees
   to unregister it, which it refuses while the runner has a job.
+- `reuse_for: 30m` keeps a runner's container after its job and gives it the next job from the same
+  repository that comes within that time, so the Docker images it pulled or built, `~/.npm` and the
+  rest of its home, and the checkout are still there. Before it is kept, the containers, volumes and
+  networks the job left are removed (images and the build cache stay); a container whose disk is 80%
+  full or more is destroyed instead, and the next job gets a fresh one. GitHub hands a job to whichever
+  idle runner asks first, so a kept container is only started again when every job waiting for this
+  pool is from its repo, and jobs of other repos are held back for the few seconds until it has taken
+  its job; a kept container never runs another repo's job. Kept containers hold a slot (and memory)
+  and give way when a fresh runner needs one. It can't be combined with `warm` or `min`, whose fresh
+  spares would take the job. The trade-off: a job is no longer guaranteed a clean machine, and a job
+  can leave something behind (a file, an installed package, a changed tool) that a later job of the
+  same repo, a pull request's or the main branch's, runs with. Use it for repos whose branches you
+  trust as much as the main branch. `max_lifetime` still caps a container's whole life.
 - `cache: true` mounts a host folder (`cache.dir`, one subfolder per org or account) at
   `/opt/pve-cache` in each runner and points the actions tool cache (`setup-node`, `setup-go`, ...),
   npm, yarn, Go, pip and Playwright there, so these downloads are kept between jobs. Every repo of

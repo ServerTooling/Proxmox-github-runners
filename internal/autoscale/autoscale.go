@@ -110,6 +110,17 @@ type Listener struct {
 	unclaimedSince time.Time
 	lastReclaim    time.Time
 	renew          bool
+
+	// Reuse (pool.reuse_for, see reuse.go). pending are the jobs this listener acquired that no runner
+	// has started yet (request ID -> the repo's reuse tag); deferred are jobs of other repos it holds
+	// back while armedFor names the repo a kept container was started again for. arming (vmid -> reuse
+	// tag) and keeping (runner names whose guest is being cleaned after a job) are under stepMu.
+	pending  map[int64]pendingJob
+	deferred map[int64]string
+	armedFor string
+	arming   map[int]string
+	keeping  map[string]bool
+	needRoom bool
 }
 
 // Runner states, as logged in "runner state" lines.
@@ -118,6 +129,7 @@ const (
 	StateRegistered   = "registered"
 	StateBusy         = "busy"
 	StateDone         = "done"
+	StateKept         = "kept" // pool.reuse_for: waiting after a job for the next one of its repo
 )
 
 // queuedWarnAfter is how long a job may wait for a runner before every reconcile warns about it.
@@ -295,9 +307,11 @@ func (l *Listener) claimWaiting(ctx context.Context, sess *scaleset.Session) (in
 		return 0, err
 	}
 	var claim []int64
+	repos := map[int64]string{}
 	for _, j := range jobs {
-		if l.serves(ctx, j) {
+		if l.serves(ctx, j) && !l.holdBack(j) {
 			claim = append(claim, j.RunnerRequestID)
+			repos[j.RunnerRequestID] = pve.ReuseTag(j.OwnerName, j.RepositoryName)
 		}
 	}
 	if len(claim) == 0 {
@@ -307,6 +321,7 @@ func (l *Listener) claimWaiting(ctx context.Context, sess *scaleset.Session) (in
 	if err != nil {
 		return 0, err
 	}
+	l.addPending(got, repos)
 	l.lastJob = l.now()
 	l.log().Info("acquired waiting jobs", "listener", l.Name(), "requested", len(claim), "acquired", len(got))
 	return len(got), nil
@@ -347,18 +362,24 @@ func (l *Listener) handle(ctx context.Context, sess *scaleset.Session, msg *scal
 		l.log().Warn("skipping message", "listener", l.Name(), "err", err)
 	}
 	var claim []int64
+	repos := map[int64]string{}
 	for _, j := range jobs {
 		l.Jobs.record(j)
 		switch j.Type {
 		case "JobAvailable":
 			if l.serves(ctx, j) {
-				claim = append(claim, j.RunnerRequestID)
 				l.lastJob = l.now()
+				if l.holdBack(j) {
+					continue
+				}
+				claim = append(claim, j.RunnerRequestID)
+				repos[j.RunnerRequestID] = pve.ReuseTag(j.OwnerName, j.RepositoryName)
 			}
 		case "JobAssigned":
 			l.lastJob = l.now()
 		case "JobStarted":
 			l.lastJob = l.now()
+			delete(l.pending, j.RunnerRequestID)
 			l.setBusy(j.RunnerName, true)
 			l.dropQueued(j)
 			l.labels.Add(1)
@@ -369,6 +390,8 @@ func (l *Listener) handle(ctx context.Context, sess *scaleset.Session, msg *scal
 			l.log().Info("job started", "listener", l.Name(), "repo", j.OwnerName+"/"+j.RepositoryName, "runner", j.RunnerName,
 				"job", j.JobDisplayName, "run_id", j.WorkflowRunID)
 		case "JobCompleted":
+			delete(l.pending, j.RunnerRequestID)
+			delete(l.deferred, j.RunnerRequestID)
 			if j.RunnerName == "" {
 				// The job ended (cancelled, usually) before any runner took it. It says nothing about the
 				// other jobs or about any runner, so nothing changes here.
@@ -379,6 +402,9 @@ func (l *Listener) handle(ctx context.Context, sess *scaleset.Session, msg *scal
 			l.setBusy(j.RunnerName, false)
 			l.log().Info("job completed", "listener", l.Name(), "repo", j.OwnerName+"/"+j.RepositoryName,
 				"runner", j.RunnerName, "job", j.JobDisplayName, "run_id", j.WorkflowRunID, "result", j.Result)
+			if l.reuse() {
+				l.startKeep(ctx, j)
+			}
 		}
 	}
 	if len(claim) > 0 {
@@ -386,6 +412,7 @@ func (l *Listener) handle(ctx context.Context, sess *scaleset.Session, msg *scal
 		if err != nil {
 			return fmt.Errorf("acquire jobs: %w", err)
 		}
+		l.addPending(got, repos)
 		l.log().Info("acquired jobs", "listener", l.Name(), "requested", len(claim), "acquired", len(got))
 	}
 	if err := sess.DeleteMessage(ctx, msg.ID); err != nil {
@@ -482,6 +509,9 @@ type fleet struct {
 	busy         int
 	// spare are registered runners without a job that could be removed, newest first.
 	spare []pve.Guest
+	// kept are guests waiting after a job for their repo's next one (pool.reuse_for), longest left first.
+	// They have no runner, so they are not live, but they hold a slot.
+	kept []pve.Guest
 }
 
 func (l *Listener) setBusy(runner string, busy bool) {
@@ -538,7 +568,11 @@ func (l *Listener) survey(ctx context.Context) (fleet, error) {
 		l.registered = map[int]bool{}
 	}
 	l.stepMu.Lock()
-	starting, spawning := maps.Clone(l.starting), l.spawning
+	starting, spawning, keeping := maps.Clone(l.starting), l.spawning, maps.Clone(l.keeping)
+	armedFor := ""
+	for _, tag := range l.arming {
+		armedFor = tag
+	}
 	l.stepMu.Unlock()
 	f.live, f.provisioning = spawning, spawning
 	seen, names := map[int]bool{}, map[string]bool{}
@@ -559,6 +593,36 @@ func (l *Listener) survey(ctx context.Context) (fleet, error) {
 			l.setState(g.VMID, g.Name, StateBusy)
 			f.live++
 			f.busy++
+			continue
+		}
+		if keeping[g.Name] {
+			continue // its job just ended; it is being cleaned to be kept
+		}
+		if until := g.TagTime("kept"); !until.IsZero() {
+			if l.now().After(until) {
+				l.destroyKept(ctx, g, "unused for reuse_for")
+				continue
+			}
+			l.setState(g.VMID, g.Name, StateKept, "until", until.UTC().Format(time.RFC3339))
+			f.kept = append(f.kept, g)
+			continue
+		}
+		if at := g.TagTime("armed"); !at.IsZero() {
+			// Started again for its repo's next job, which it hasn't begun: it counts as provisioning until
+			// it does, so it is never trimmed as idle, and other repos' jobs wait (holdBack).
+			if l.now().Sub(at) < l.startGrace() {
+				l.setState(g.VMID, g.Name, StateProvisioning, "reused", true)
+				f.live++
+				f.provisioning++
+				armedFor = reuseTagOf(g)
+				continue
+			}
+			if !l.remove(ctx, g, "reused runner got no job within start grace", true) {
+				l.setBusy(g.Name, true)
+				l.setState(g.VMID, g.Name, StateBusy)
+				f.live++
+				f.busy++
+			}
 			continue
 		}
 		if !l.registered[g.VMID] {
@@ -618,6 +682,9 @@ func (l *Listener) survey(ctx context.Context) (fleet, error) {
 	}
 	l.stepMu.Unlock()
 	slices.SortFunc(f.spare, func(a, b pve.Guest) int { return cmp.Compare(createdAt(b), createdAt(a)) })
+	// Longest left first: arming takes from the front, making room from the back.
+	slices.SortFunc(f.kept, func(a, b pve.Guest) int { return b.TagTime("kept").Compare(a.TagTime("kept")) })
+	l.armedFor = armedFor
 	return f, nil
 }
 
@@ -735,14 +802,25 @@ func (l *Listener) scale(ctx context.Context, sess *scaleset.Session, stats scal
 		l.trim(ctx, f.spare, have-want)
 		return
 	}
+	if l.reuse() {
+		l.releaseDeferred(ctx, sess)
+		l.prunePending()
+	}
 	if have >= want {
+		if l.reuse() && l.needRoom {
+			l.makeRoom(ctx, f.kept, 1)
+		}
 		return
+	}
+	n := want - have
+	if l.reuse() {
+		n = l.useKept(ctx, f, stats, n)
 	}
 	// All at once: the provisioner takes them one clone at a time, and each one's start and boot
 	// overlap the next one's clone. They run beside the message loop: a listener that stops polling
 	// while a clone runs loses the jobs offered meanwhile (GitHub never assigns them again), and
 	// survey counts them as provisioning until they return.
-	for range want - have {
+	for range n {
 		l.spawn(ctx, want, have)
 	}
 }
@@ -790,6 +868,9 @@ func (l *Listener) spawn(ctx context.Context, want, have int) {
 		case errors.Is(err, provision.ErrAtCapacity):
 			// The host or pool is full; GitHub keeps the job queued until a runner frees up.
 			l.log().Info("at capacity", "listener", l.Name(), "want", want, "have", have, "reason", err)
+			l.stepMu.Lock()
+			l.needRoom = true // a kept container gives way on the next poll
+			l.stepMu.Unlock()
 		case errors.Is(err, provision.ErrDraining):
 			// the service restarts for an update and spawns again after
 		case err != nil:

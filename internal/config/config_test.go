@@ -369,3 +369,21 @@ func TestDockerValidation(t *testing.T) {
 		}
 	}
 }
+
+func TestReuseForValidation(t *testing.T) {
+	c, _, err := Parse([]byte(valid + "    reuse_for: 30m\n"))
+	if err != nil || c.Pools["small"].ReuseFor != 30*time.Minute {
+		t.Fatalf("reuse_for: %v %+v", err, c)
+	}
+	for _, tc := range []struct{ extra, want string }{
+		{"    reuse_for: 5h\n", "between 0 and 4h0m0s"},
+		{"    reuse_for: 30m\n    warm: 1\n", "can't be combined with warm or min"},
+		{"    reuse_for: 30m\n    min: 1\n", "can't be combined with warm or min"},
+		{"  nas: {type: docker, image: ubuntu-latest, labels: [nas], reuse_for: 30m}\ndocker: {ssh: a@192.0.2.20}\n", "only works for lxc pools"},
+	} {
+		_, _, err := Parse([]byte(valid + tc.extra))
+		if err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%q: got %v, want %q", tc.extra, err, tc.want)
+		}
+	}
+}

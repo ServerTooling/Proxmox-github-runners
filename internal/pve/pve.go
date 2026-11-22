@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"os/exec"
 	"slices"
 	"strconv"
@@ -81,6 +82,11 @@ type LXCSpec struct {
 // its config alone.
 func LXCLabelCmd(id int, tags []string, description string) Cmd {
 	return Cmd{"pct", []string{"set", strconv.Itoa(id), "--tags", strings.Join(tags, ";"), "--description", description}}
+}
+
+// LXCTagsCmd replaces a guest's tags and leaves its notes alone.
+func LXCTagsCmd(id int, tags []string) Cmd {
+	return Cmd{"pct", []string{"set", strconv.Itoa(id), "--tags", strings.Join(tags, ";")}}
 }
 
 // CacheMount is where a runner sees its owner's shared cache folder.
@@ -241,6 +247,27 @@ func (g Guest) Tags() []string {
 }
 
 func (g Guest) HasTag(t string) bool { return slices.Contains(g.Tags(), t) }
+
+// TagTime reads a "key-<unix seconds>" tag; the zero time when there is none.
+func (g Guest) TagTime(key string) time.Time {
+	n, err := strconv.ParseInt(g.TagValue(key), 10, 64)
+	if err != nil || n <= 0 {
+		return time.Time{}
+	}
+	return time.Unix(n, 0)
+}
+
+// Runners of pools with reuse_for carry these tags between jobs: kept-<unix> while the container waits
+// after a job (until then), armed-<unix> once it was started again for the next job of its repo (at
+// then) and has not begun it yet, and reuse-<hash> naming that repo for good. The hash keeps the full
+// name (tags are cut short and lose characters), so two repos never share a container.
+func KeptTag(until time.Time) string { return "kept-" + strconv.FormatInt(until.Unix(), 10) }
+func ArmedTag(at time.Time) string   { return "armed-" + strconv.FormatInt(at.Unix(), 10) }
+func ReuseTag(owner, repo string) string {
+	h := fnv.New64a()
+	h.Write([]byte(strings.ToLower(owner + "/" + repo)))
+	return fmt.Sprintf("reuse-%016x", h.Sum64())
+}
 
 // TagValue returns the value of a "key-value" tag (Proxmox tags can't contain '=' or ':').
 func (g Guest) TagValue(key string) string {
@@ -481,6 +508,11 @@ func ParseUnitState(out []byte, err error) (string, error) {
 }
 
 // Label replaces a runner guest's tags and notes.
+// SetTags replaces a runner's tags.
+func (h *Host) SetTags(ctx context.Context, id int, tags []string) error {
+	return h.Exec(ctx, LXCTagsCmd(id, tags))
+}
+
 func (h *Host) Label(ctx context.Context, id int, tags []string, notes string) error {
 	return h.Exec(ctx, LXCLabelCmd(id, tags, notes))
 }

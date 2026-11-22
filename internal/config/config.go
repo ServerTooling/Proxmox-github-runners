@@ -146,6 +146,10 @@ type Pool struct {
 	// They are removed once no job has come for WarmFor.
 	Warm    int           `yaml:"warm,omitempty"`
 	WarmFor time.Duration `yaml:"warm_for,omitempty"`
+	// ReuseFor keeps a runner's container after its job, for up to this long, and hands it the next
+	// job from the same repository, so Docker images, npm packages and the checkout are still there.
+	// 0 = every job gets a fresh container. It replaces warm and min: a fresh spare would take the job.
+	ReuseFor time.Duration `yaml:"reuse_for,omitempty"`
 	// Cache mounts the owner's shared cache folder (cache.dir) into each runner, so toolchains and
 	// package downloads survive between jobs.
 	Cache       bool          `yaml:"cache,omitempty"`
@@ -157,6 +161,9 @@ type Pool struct {
 	// defaults to the first label.
 	ScaleSet string `yaml:"scale_set,omitempty"`
 }
+
+// MaxReuseFor caps pool.reuse_for: a kept container holds a runner slot and its memory while it waits.
+const MaxReuseFor = 4 * time.Hour
 
 // ScaleSetName is the scale set the autoscaler registers this pool's runners in.
 func (p *Pool) ScaleSetName() string {
@@ -701,6 +708,16 @@ func (c *Config) Validate() error {
 		}
 		if p.Warm > p.Max {
 			add("pools.%s.warm (%d) is larger than max (%d)", name, p.Warm, p.Max)
+		}
+		switch {
+		case p.ReuseFor < 0 || p.ReuseFor > MaxReuseFor:
+			add("pools.%s.reuse_for must be between 0 and %s, got %s", name, MaxReuseFor, p.ReuseFor)
+		case p.ReuseFor > 0 && p.Type != "lxc":
+			add("pools.%s.reuse_for only works for lxc pools", name)
+		case p.ReuseFor > 0 && (p.Warm > 0 || p.Min > 0):
+			// GitHub hands a job to any idle runner of the scale set, so an idle fresh spare would take the
+			// job a kept container was started again for.
+			add("pools.%s: reuse_for can't be combined with warm or min; set those to 0", name)
 		}
 		for _, l := range p.Labels {
 			if !labelRe.MatchString(l) {
