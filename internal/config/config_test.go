@@ -310,62 +310,26 @@ func TestAutoscaleDefaultsAndScaleSetNames(t *testing.T) {
 	}
 }
 
-func TestDockerPools(t *testing.T) {
+// Builds with docker pools wrote a docker: section into every config they saved; it must still load,
+// and the next save drops it.
+func TestOldDockerSectionStillLoads(t *testing.T) {
 	c, _, err := Parse([]byte(valid + `
-  nas:
-    type: docker
-    image: ubuntu-latest
-    labels: [nas]
-    max_lifetime: 6h
 docker:
-  ssh: ghrunner@192.0.2.20
-  max_runners: 6
+  ssh: ""
+  port: 22
+  key_file: /etc/pve-runners/docker_ed25519
+  known_hosts: /etc/pve-runners/docker_known_hosts
+  max_runners: 4
+  id_range: [9500, 9599]
 `))
 	if err != nil {
 		t.Fatal(err)
-	}
-	nas := c.Pools["nas"]
-	// A docker pool's max follows the machine, and it gets no Proxmox bridge.
-	if nas.Max != 6 || nas.Bridge != "" || c.Docker.Port != 22 || c.Docker.IDRange != [2]int{9500, 9599} ||
-		c.Docker.KeyFile != "/etc/pve-runners/docker_ed25519" || !c.Docker.Enabled() {
-		t.Fatalf("defaults: %+v %+v", nas, c.Docker)
 	}
 	out, err := c.Render()
 	if err != nil {
 		t.Fatal(err)
 	}
-	back, _, err := Parse(out)
-	if err != nil {
-		t.Fatalf("rendered config does not parse: %v\n%s", err, out)
-	}
-	if again, _ := back.Render(); string(again) != string(out) {
-		t.Fatalf("round trip changed the config:\n%s\n---\n%s", out, again)
-	}
-	section := string(out[strings.Index(string(out), "\n  nas:"):strings.Index(string(out), "\n  small:")])
-	for _, gone := range []string{"disk_gb", "bridge", "cache", "vlan", "full_clone"} {
-		if strings.Contains(section, gone) {
-			t.Errorf("docker pool shows %s, which it doesn't have:\n%s", gone, section)
-		}
-	}
-	if !strings.Contains(section, "max_lifetime: 6h") {
-		t.Errorf("max_lifetime lost:\n%s", section)
-	}
-}
-
-func TestDockerValidation(t *testing.T) {
-	for _, tc := range []struct{ extra, want string }{
-		{"  nas: {type: docker, image: ubuntu-latest, labels: [nas]}\n", "docker.ssh is not set"},
-		{"  nas: {type: docker, template: 8001, labels: [nas]}\ndocker: {ssh: a@192.0.2.20}\n", "needs an image"},
-		{"  nas: {type: docker, image: ubuntu-latest, labels: [nas], cache: true}\ndocker: {ssh: a@192.0.2.20}\n", "no cache"},
-		{"docker: {ssh: '-oProxyCommand=x@h'}\n", "must be user@host"},
-		{"docker: {ssh: a@192.0.2.20, id_range: [9400, 9600]}\n", "overlaps proxmox.vmid_range"},
-		{"docker: {ssh: a@192.0.2.20, id_range: [8950, 8960]}\n", "overlaps images.vmid_range"},
-		{"docker: {ssh: a@192.0.2.20, id_range: [9500, 9501], max_runners: 3}\n", "docker.max_runners"},
-		{"docker: {ssh: a@192.0.2.20, key_file: relative}\n", "absolute paths"},
-	} {
-		_, _, err := Parse([]byte(valid + tc.extra))
-		if err == nil || !strings.Contains(err.Error(), tc.want) {
-			t.Errorf("%q: got %v, want %q", tc.extra, err, tc.want)
-		}
+	if strings.Contains(string(out), "docker:\n") || strings.Contains(string(out), "known_hosts") {
+		t.Fatalf("docker section written back:\n%s", out)
 	}
 }
