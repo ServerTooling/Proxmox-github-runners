@@ -3,6 +3,8 @@ package autoscale
 import (
 	"slices"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -168,4 +170,37 @@ func TestRunnerOfAnotherRepoIsNotKept(t *testing.T) {
 	h.svc.Push(1, job("JobStarted", 2, "web", "gh-pve1-small-9000"))
 	h.svc.Push(0, job("JobCompleted", 2, "web", "gh-pve1-small-9000"))
 	eventually(t, "destroyed", func() bool { return !hasVMID(h, t, 9000) })
+}
+
+// GitHub assigns most jobs to the scale set itself (JobAssigned, no JobAvailable to acquire). In a
+// workflow the repo's next job is assigned the moment the one before it ends, while that runner is
+// still being cleaned: it waits for that runner instead of getting a fresh one.
+func TestNextJobAssignedWhileRunnerIsCleanedReusesIt(t *testing.T) {
+	h, _, _ := reuseHarness(t, "42%")
+	release := make(chan struct{})
+	var once sync.Once
+	var cleaning atomic.Bool
+	h.pve.Before = func(line string) {
+		if strings.Contains(line, "docker volume prune") {
+			cleaning.Store(true)
+			<-release
+		}
+	}
+	h.start(t)
+	// After start's cleanup in the order cleanups run, so a failing test doesn't hang stopping it.
+	t.Cleanup(func() { once.Do(func() { close(release) }) })
+	h.svc.Push(1, job("JobAssigned", 1, "app", ""))
+	eventually(t, "runner", func() bool { return calls(h, "systemctl start gh-runner.service") == 1 })
+	h.svc.Push(1, job("JobStarted", 1, "app", "gh-pve1-small-9000"))
+	h.svc.Push(1, job("JobCompleted", 1, "app", "gh-pve1-small-9000"), job("JobAssigned", 2, "app", ""))
+	eventually(t, "cleaning", cleaning.Load)
+	time.Sleep(30 * time.Millisecond) // several polls while it is cleaned
+	if calls(h, "pct clone") != 1 {
+		t.Fatalf("a fresh runner started while the repo's runner was cleaned: %v", h.pve.Mutations())
+	}
+	once.Do(func() { close(release) })
+	eventually(t, "armed", func() bool { return calls(h, "systemctl start gh-runner.service") == 2 })
+	if calls(h, "pct clone") != 1 || h.svc.JITNames()[1] != "gh-pve1-small-9000" {
+		t.Fatalf("registrations %v, commands %v", h.svc.JITNames(), h.pve.Mutations())
+	}
 }
