@@ -345,10 +345,8 @@ func (p *Provisioner) Spawn(ctx context.Context, req Request) (res *Result, err 
 	}
 	start := startRunner
 	if pool.ReuseFor > 0 {
-		if err = p.pushFile(ctx, id, reuseDropIn, reuseDropInPath, "0644"); err != nil {
-			return nil, err
-		}
-		start = strings.Replace(startRunner, "systemctl start", "systemctl daemon-reload || exit 1\nsystemctl start", 1)
+		// Written from inside the guest: pct push doesn't create the missing drop-in directory.
+		start = strings.Replace(startRunner, "systemctl start", reuseDropInScript+"systemctl start", 1)
 	}
 	if err = p.pushFile(ctx, id, jit.EncodedJITConfig, "/etc/gh-runner/jitconfig", "0600"); err != nil {
 		return nil, err
@@ -375,11 +373,12 @@ done
 systemctl start gh-runner.service || exit 1
 exec systemctl is-active gh-runner.service`
 
-// reuseDropIn keeps the guest up when its runner exits (pool.reuse_for): the image's unit powers the
+// reuseDropInScript keeps the guest up when its runner exits (pool.reuse_for): the image's unit powers the
 // guest off after its one job, and the autoscaler starts it again for the next job of the same repo.
 const (
-	reuseDropInPath = "/etc/systemd/system/gh-runner.service.d/reuse.conf"
-	reuseDropIn     = "[Service]\nExecStopPost=\n"
+	reuseDropInScript = "mkdir -p /etc/systemd/system/gh-runner.service.d &&\n" +
+		"printf '[Service]\\nExecStopPost=\\n' >/etc/systemd/system/gh-runner.service.d/reuse.conf &&\n" +
+		"systemctl daemon-reload || exit 1\n"
 )
 
 // cleanScript runs in a kept guest after its job: containers, volumes and networks the job left go, so
