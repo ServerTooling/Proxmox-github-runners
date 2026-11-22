@@ -602,7 +602,8 @@ func TestSpawnStopsAHungClone(t *testing.T) {
 }
 
 // A pool with reuse_for keeps the guest up when its runner exits: a drop-in clears the image's
-// power-off, and systemd reads it before the runner starts.
+// power-off, and systemd reads it before the runner starts. It is written from inside the guest,
+// because pct push doesn't create the drop-in directory.
 func TestSpawnForReusePoolKeepsGuestAfterJob(t *testing.T) {
 	p, f, gh := setup(t)
 	gh.RunnerGroups["Example-Org"] = gh.RunnerGroups["example-org"]
@@ -610,18 +611,18 @@ func TestSpawnForReusePoolKeepsGuestAfterJob(t *testing.T) {
 	if _, err := p.Spawn(context.Background(), Request{Pool: "small", Target: org}); err != nil {
 		t.Fatal(err)
 	}
-	if got := f.Pushed["9000:"+reuseDropInPath]; got != "[Service]\nExecStopPost=\n" {
-		t.Fatalf("drop-in = %q", got)
-	}
 	m := f.Mutations()
-	last := m[len(m)-1]
-	if !strings.Contains(last, "systemctl daemon-reload || exit 1\nsystemctl start gh-runner.service") {
-		t.Fatalf("start: %q", last)
+	want := "pct exec 9000 -- sh -c " + strings.Replace(startRunner, "systemctl start",
+		"mkdir -p /etc/systemd/system/gh-runner.service.d &&\n"+
+			"printf '[Service]\\nExecStopPost=\\n' >/etc/systemd/system/gh-runner.service.d/reuse.conf &&\n"+
+			"systemctl daemon-reload || exit 1\nsystemctl start", 1)
+	if last := m[len(m)-1]; last != want {
+		t.Fatalf("start:\n%s\nwant:\n%s", last, want)
 	}
-	i := slices.IndexFunc(m, func(c string) bool { return strings.HasSuffix(c, reuseDropInPath+" --perms 0644") })
-	j := slices.IndexFunc(m, func(c string) bool { return strings.HasSuffix(c, "/etc/gh-runner/jitconfig --perms 0600") })
-	if i < 0 || j < i {
-		t.Fatalf("drop-in must go in before the config: %q", m)
+	for _, c := range m {
+		if strings.Contains(c, "pct push") && strings.Contains(c, "gh-runner.service.d") {
+			t.Fatalf("drop-in pushed: %q", c)
+		}
 	}
 }
 
